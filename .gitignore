@@ -1,0 +1,46 @@
+# macOS
+.DS_Store
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+.venv/
+.venv-*/
+venv/
+env/
+
+# Backend runtime files
+backend/uploads/
+backend/results/
+backend/app.db
+
+# Frontend dependencies and builds
+frontend/node_modules/
+frontend/dist/
+
+# YOLO / experiment outputs
+runs/
+outputs/
+
+# Local datasets and downloaded archives
+datasets/
+raw_datasets/
+test_images/
+test_images_vehicle/
+*.zip
+*.tar
+*.tar.gz
+*.7z
+
+# Local model artifacts
+# Keep this ignored if the model is shared through GitHub Releases or another storage service.
+models/*.pt
+models/*.onnx
+models/*.engine
+*.pt
+
+# Logs and environment files
+*.log
+.env
+.env.*
