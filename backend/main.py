@@ -5,6 +5,7 @@ from ultralytics import YOLO
 from pathlib import Path
 from pydantic import BaseModel
 from datetime import datetime, timedelta, timezone
+import cv2
 import hashlib
 import hmac
 import shutil
@@ -26,16 +27,39 @@ app.add_middleware(
 )
 
 BASE_DIR = Path(__file__).resolve().parent
+PROJECT_DIR = BASE_DIR.parent
+MODEL_DIR = PROJECT_DIR / "models"
 UPLOAD_DIR = BASE_DIR / "uploads"
 RESULT_DIR = BASE_DIR / "results"
 DB_PATH = BASE_DIR / "app.db"
 TOKEN_HOURS = 12
+SCENE_MODEL_PATH = MODEL_DIR / "best.pt"
+VISDRONE_MODEL_PATH = MODEL_DIR / "yolov8x-visdrone.pt"
+
+VISDRONE_VEHICLE_CLASSES = {
+    "bicycle",
+    "car",
+    "van",
+    "truck",
+    "tricycle",
+    "awning-tricycle",
+    "bus",
+    "motor",
+}
+VISDRONE_PERSON_CLASSES = {"pedestrian", "people"}
 
 UPLOAD_DIR.mkdir(exist_ok=True)
 RESULT_DIR.mkdir(exist_ok=True)
 
 # 加载 YOLO 模型
-model = YOLO("models/best.pt")
+scene_model = YOLO(str(SCENE_MODEL_PATH))
+visdrone_model = None
+visdrone_model_error = ""
+if VISDRONE_MODEL_PATH.exists():
+    try:
+        visdrone_model = YOLO(str(VISDRONE_MODEL_PATH))
+    except Exception as exc:
+        visdrone_model_error = str(exc)
 
 # 让浏览器可以访问检测结果图片
 app.mount("/results", StaticFiles(directory=str(RESULT_DIR)), name="results")
@@ -179,6 +203,79 @@ def expanded_box(box, margin_x, margin_y):
     }
 
 
+def is_fine_vehicle(item):
+    return item.get("model_role") == "fine_target" and item["class_name"] in VISDRONE_VEHICLE_CLASSES
+
+
+def is_fine_person(item):
+    return item.get("model_role") == "fine_target" and item["class_name"] in VISDRONE_PERSON_CLASSES
+
+
+def run_yolo_detection(yolo_model, image_path, model_role, conf=0.25):
+    results = yolo_model(str(image_path), conf=conf)
+    detections = []
+    image_width = 0
+    image_height = 0
+
+    for result in results:
+        if result.orig_shape:
+            image_height, image_width = result.orig_shape
+
+        for box in result.boxes:
+            cls_id = int(box.cls[0])
+            cls_name = yolo_model.names[cls_id]
+            confidence = float(box.conf[0])
+            x1, y1, x2, y2 = box.xyxy[0].tolist()
+
+            detections.append({
+                "class_id": cls_id,
+                "class_name": cls_name,
+                "confidence": round(confidence, 4),
+                "model_role": model_role,
+                "box": {
+                    "x1": round(x1, 2),
+                    "y1": round(y1, 2),
+                    "x2": round(x2, 2),
+                    "y2": round(y2, 2)
+                },
+                "area": round((x2 - x1) * (y2 - y1), 2)
+            })
+
+    return detections, image_width, image_height
+
+
+def draw_detection_result(image_path, output_path, detections):
+    image = cv2.imread(str(image_path))
+    if image is None:
+        return
+
+    colors = {
+        "scene": (65, 180, 75),
+        "fine_target": (245, 134, 52),
+    }
+
+    for item in detections:
+        box = item["box"]
+        x1, y1, x2, y2 = [int(box[key]) for key in ("x1", "y1", "x2", "y2")]
+        color = colors.get(item.get("model_role"), (255, 255, 255))
+        label = f"{item['class_name']} {item['confidence']:.2f}"
+
+        cv2.rectangle(image, (x1, y1), (x2, y2), color, 2)
+        label_y = max(y1 - 8, 16)
+        cv2.putText(
+            image,
+            label,
+            (x1, label_y),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.5,
+            color,
+            1,
+            cv2.LINE_AA,
+        )
+
+    cv2.imwrite(str(output_path), image)
+
+
 def risk_score_to_level(score):
     if score >= 75:
         return "高风险"
@@ -199,13 +296,18 @@ def module_status(score):
     return "正常"
 
 
-def analyze_scene(detections, class_count, image_width, image_height):
+def analyze_scene(detections, class_count, image_width, image_height, fine_detections=None):
+    fine_detections = fine_detections or []
+    all_detections = detections + fine_detections
     image_area = max(1, image_width * image_height)
     groups = {}
     for item in detections:
         groups.setdefault(item["class_name"], []).append(item)
 
-    vehicles = groups.get("vehicle", [])
+    scene_vehicles = groups.get("vehicle", [])
+    fine_vehicles = [item for item in fine_detections if is_fine_vehicle(item)]
+    fine_people = [item for item in fine_detections if is_fine_person(item)]
+    vehicles = fine_vehicles if fine_vehicles else scene_vehicles
     roads = groups.get("road_area", [])
     waters = groups.get("water", [])
     buildings = groups.get("building", [])
@@ -319,22 +421,34 @@ def analyze_scene(detections, class_count, image_width, image_height):
             if any(point_in_box(center, expanded_box(water["box"], margin_x, margin_y)) for water in waters):
                 water_near_vehicle += 1
 
-    if waters and water_near_vehicle:
-        water_score = min(80, 35 + water_near_vehicle * 15)
-        water_reason = f"检测到水域区域，且有 {water_near_vehicle} 个车辆目标位于水域邻近范围。"
-        water_suggestion = "建议对水域周边车辆活动进行人工复核，关注临水道路或停车风险。"
+    water_near_person = 0
+    if waters:
+        margin_x = image_width * 0.04
+        margin_y = image_height * 0.04
+        for person in fine_people:
+            center = center_of_box(person["box"])
+            if any(point_in_box(center, expanded_box(water["box"], margin_x, margin_y)) for water in waters):
+                water_near_person += 1
+
+    if waters and (water_near_vehicle or water_near_person):
+        water_score = min(85, 35 + water_near_vehicle * 15 + water_near_person * 18)
+        water_reason = (
+            f"检测到水域区域，且有 {water_near_vehicle} 个车辆目标、"
+            f"{water_near_person} 个人员目标位于水域邻近范围。"
+        )
+        water_suggestion = "建议对水域周边人员和车辆活动进行人工复核，关注临水道路、停留和落水风险。"
     elif waters:
         water_score = 5
-        water_reason = f"检测到水域区域，水域面积占比约 {water_ratio:.2f}%，未发现车辆邻近水域。"
+        water_reason = f"检测到水域区域，水域面积占比约 {water_ratio:.2f}%，未发现人员或车辆邻近水域。"
         water_suggestion = "当前水域周边风险较低，可作为常规巡检记录。"
     else:
         water_score = 0
         water_reason = "未检测到水域区域。"
         water_suggestion = "当前图像跳过水域异常分析。"
 
-    low_conf_count = len([item for item in detections if item["confidence"] < 0.4])
-    if detections:
-        low_conf_rate = low_conf_count / len(detections)
+    low_conf_count = len([item for item in all_detections if item["confidence"] < 0.4])
+    if all_detections:
+        low_conf_rate = low_conf_count / len(all_detections)
         confidence_score = 35 if low_conf_rate >= 0.35 else 15 if low_conf_rate >= 0.2 else 0
         confidence_reason = (
             f"检测目标中有 {low_conf_count} 个置信度低于 40%，低置信度占比 {low_conf_rate:.0%}。"
@@ -393,7 +507,7 @@ def analyze_scene(detections, class_count, image_width, image_height):
 
     summary = (
         f"综合判断，该图像属于{scene_type}。"
-        f"系统识别到 {len(detections)} 个目标，主要场景标签包括："
+        f"系统识别到 {len(all_detections)} 个目标，主要场景标签包括："
         f"{'、'.join(scene_tags) if scene_tags else '暂无明确标签'}。"
         f"当前综合风险等级为{risk_level}，{key_points}。"
     )
@@ -406,9 +520,12 @@ def analyze_scene(detections, class_count, image_width, image_height):
         "area_ratio": area_ratio,
         "metrics": {
             "vehicle_count": vehicle_count,
+            "fine_vehicle_count": len(fine_vehicles),
+            "person_count": len(fine_people),
             "road_vehicle_count": road_vehicle_count,
             "offroad_vehicle_count": offroad_count,
             "water_near_vehicle_count": water_near_vehicle,
+            "water_near_person_count": water_near_person,
             "low_confidence_count": low_conf_count,
         },
         "summary": summary,
@@ -420,7 +537,11 @@ def analyze_scene(detections, class_count, image_width, image_height):
 def root():
     return {
         "message": "无人机航拍图像智能识别后端已启动",
-        "status": "running"
+        "status": "running",
+        "models": {
+            "scene": True,
+            "visdrone": visdrone_model is not None,
+        },
     }
 
 
@@ -474,39 +595,21 @@ async def detect_image(file: UploadFile = File(...), current_user=Depends(get_cu
     with open(upload_path, "wb") as buffer:
         shutil.copyfileobj(file.file, buffer)
 
-    # YOLO 检测
-    results = model(str(upload_path), conf=0.25)
+    # 多模型融合检测：场景模型识别道路/建筑/树木/水域等，VisDrone 模型补充行人和细粒度车辆。
+    scene_detections, image_width, image_height = run_yolo_detection(scene_model, upload_path, "scene", conf=0.25)
+    fine_detections = []
+    if visdrone_model:
+        fine_detections, fine_width, fine_height = run_yolo_detection(
+            visdrone_model,
+            upload_path,
+            "fine_target",
+            conf=0.25,
+        )
+        image_width = image_width or fine_width
+        image_height = image_height or fine_height
 
-    detections = []
-
-    image_width = 0
-    image_height = 0
-
-    for result in results:
-        if result.orig_shape:
-            image_height, image_width = result.orig_shape
-
-        # 保存检测结果图片
-        result.save(filename=str(result_img_path))
-
-        for box in result.boxes:
-            cls_id = int(box.cls[0])
-            cls_name = model.names[cls_id]
-            conf = float(box.conf[0])
-            x1, y1, x2, y2 = box.xyxy[0].tolist()
-
-            detections.append({
-                "class_id": cls_id,
-                "class_name": cls_name,
-                "confidence": round(conf, 4),
-                "box": {
-                    "x1": round(x1, 2),
-                    "y1": round(y1, 2),
-                    "x2": round(x2, 2),
-                    "y2": round(y2, 2)
-                },
-                "area": round((x2 - x1) * (y2 - y1), 2)
-            })
+    detections = scene_detections + fine_detections
+    draw_detection_result(upload_path, result_img_path, detections)
 
     # 类别数量统计
     class_count = {}
@@ -514,13 +617,15 @@ async def detect_image(file: UploadFile = File(...), current_user=Depends(get_cu
         name = item["class_name"]
         class_count[name] = class_count.get(name, 0) + 1
 
-    analysis = analyze_scene(detections, class_count, image_width, image_height)
+    analysis = analyze_scene(scene_detections, class_count, image_width, image_height, fine_detections)
 
     # 自动分析报告
     if detections:
         main_class = max(class_count, key=class_count.get)
+        fine_target_count = len(fine_detections)
         report = (
             f"本次图像共检测到 {len(detections)} 个目标。"
+            f"其中场景要素 {len(scene_detections)} 个，细粒度目标 {fine_target_count} 个。"
             f"其中数量最多的类别为 {main_class}，共 {class_count[main_class]} 个。"
             f"{analysis['summary']}"
         )
@@ -537,6 +642,21 @@ async def detect_image(file: UploadFile = File(...), current_user=Depends(get_cu
         "total_count": len(detections),
         "class_count": class_count,
         "detections": detections,
+        "scene_detections": scene_detections,
+        "fine_detections": fine_detections,
+        "models": {
+            "scene": {
+                "enabled": True,
+                "path": str(SCENE_MODEL_PATH),
+                "description": "自训练航拍场景模型，用于道路、建筑、树木、水域、车辆等场景要素识别。",
+            },
+            "visdrone": {
+                "enabled": visdrone_model is not None,
+                "path": str(VISDRONE_MODEL_PATH),
+                "description": "VisDrone 小目标检测模型，用于车辆、行人等细粒度目标识别。",
+                "error": visdrone_model_error,
+            },
+        },
         "result_image_url": f"/results/{file_id}_result.jpg",
         "report": report,
         "analysis": analysis
