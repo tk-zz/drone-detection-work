@@ -60,26 +60,28 @@
           <div class="console-preview" aria-label="系统能力预览">
             <div class="console-header">
               <strong>Inspection Console</strong>
-              <span>ONLINE</span>
+              <span>{{ result ? 'UPDATED' : 'ONLINE' }}</span>
             </div>
             <div class="console-main">
               <div>
                 <small>综合风险</small>
-                <strong>中风险</strong>
+                <strong :class="['console-risk-value', result ? riskClass(consoleRiskLevel) : 'risk-pending']">
+                  {{ consoleRiskLevel }}
+                </strong>
               </div>
               <div>
                 <small>检测目标</small>
-                <strong>26</strong>
+                <strong>{{ consoleTargetCount }}</strong>
               </div>
               <div>
                 <small>异常模块</small>
-                <strong>4</strong>
+                <strong>{{ consoleAbnormalCount }}</strong>
               </div>
             </div>
             <div class="console-list">
-              <p><span></span>车辆越界异常分析</p>
-              <p><span></span>道路交通密度评估</p>
-              <p><span></span>水域周边风险提示</p>
+              <p v-for="item in consoleModules" :key="item.title">
+                <span :class="riskClass(item.status)"></span>{{ item.title }}
+              </p>
             </div>
           </div>
         </div>
@@ -157,20 +159,41 @@
       </section>
 
       <section v-if="activePage === 'results' && result" class="result-shell">
-        <nav class="page-tabs" aria-label="检测结果导航">
-          <button
-            v-for="tab in tabs"
-            :key="tab.key"
-            :class="{ active: activeTab === tab.key }"
-            type="button"
-            @click="switchTab(tab.key)"
-          >
-            {{ tab.label }}
+        <div class="result-toolbar">
+          <nav class="page-tabs" aria-label="检测结果导航">
+            <button
+              v-for="tab in tabs"
+              :key="tab.key"
+              :class="{ active: activeTab === tab.key }"
+              type="button"
+              @click="switchTab(tab.key)"
+            >
+              {{ tab.label }}
+            </button>
+          </nav>
+
+          <button class="export-button" type="button" @click="exportInspectionDocument">
+            导出巡检文档
           </button>
-        </nav>
+        </div>
 
         <section v-if="activeTab === 'overview'" class="card result-card">
           <h2>检测总览</h2>
+
+          <section class="compare-panel">
+            <h3>原始图片与检测结果对比</h3>
+            <div class="compare-grid">
+              <div>
+                <span>原始图片</span>
+                <img v-if="previewUrl" :src="previewUrl" alt="原始图片" />
+                <p v-else class="empty compare-empty">当前会话暂无原始图片预览。</p>
+              </div>
+              <div>
+                <span>检测结果图</span>
+                <img :src="backendBaseUrl + result.result_image_url" alt="检测结果图" />
+              </div>
+            </div>
+          </section>
 
           <div class="result-layout">
             <div class="image-panel">
@@ -424,6 +447,30 @@ const recommendationPriority = computed(() => {
   return '常规'
 })
 
+const consoleRiskLevel = computed(() => analysis.value?.risk_level || '待检测')
+
+const consoleTargetCount = computed(() => result.value?.total_count ?? '--')
+
+const consoleAbnormalCount = computed(() => {
+  if (!analysis.value?.modules) return '--'
+  return analysis.value.modules.filter(module => module.score >= 20).length
+})
+
+const consoleModules = computed(() => {
+  if (!analysis.value?.modules?.length) {
+    return [
+      { title: '车辆越界异常分析', status: '正常' },
+      { title: '道路交通密度评估', status: '正常' },
+      { title: '水域周边风险提示', status: '正常' }
+    ]
+  }
+
+  return analysis.value.modules.slice(0, 3).map(module => ({
+    title: module.title,
+    status: module.status
+  }))
+})
+
 const overallRecommendation = computed(() => {
   if (!analysis.value) return ''
   const { scene_type, risk_level, metrics } = analysis.value
@@ -583,6 +630,124 @@ async function switchTab(tabKey) {
     await nextTick()
     renderCharts()
   }
+}
+
+function escapeHtml(value) {
+  return String(value ?? '')
+    .replaceAll('&', '&amp;')
+    .replaceAll('<', '&lt;')
+    .replaceAll('>', '&gt;')
+    .replaceAll('"', '&quot;')
+    .replaceAll("'", '&#39;')
+}
+
+async function imageUrlToDataUrl(url) {
+  const response = await fetch(url)
+  const blob = await response.blob()
+
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader()
+    reader.onloadend = () => resolve(reader.result)
+    reader.onerror = reject
+    reader.readAsDataURL(blob)
+  })
+}
+
+async function exportInspectionDocument() {
+  if (!result.value || !analysis.value) return
+
+  let resultImageDataUrl = ''
+  try {
+    resultImageDataUrl = await imageUrlToDataUrl(backendBaseUrl + result.value.result_image_url)
+  } catch (error) {
+    console.error(error)
+  }
+
+  const generatedAt = new Date().toLocaleString('zh-CN', { hour12: false })
+  const classRows = Object.entries(result.value.class_count || {})
+    .map(([name, count]) => `<tr><td>${escapeHtml(name)}</td><td>${count}</td></tr>`)
+    .join('')
+  const moduleRows = (analysis.value.modules || [])
+    .map(module => `
+      <tr>
+        <td>${escapeHtml(module.title)}</td>
+        <td>${escapeHtml(module.status)}</td>
+        <td>${module.score}</td>
+        <td>${escapeHtml(module.reason)}</td>
+        <td>${escapeHtml(module.suggestion)}</td>
+      </tr>
+    `)
+    .join('')
+  const actionItems = followUpActions.value
+    .map(action => `<li>${escapeHtml(action)}</li>`)
+    .join('')
+
+  const html = `
+    <!doctype html>
+    <html>
+      <head>
+        <meta charset="utf-8">
+        <title>无人机航拍图像巡检分析报告</title>
+        <style>
+          body { font-family: "Microsoft YaHei", Arial, sans-serif; color: #111827; line-height: 1.7; }
+          h1 { margin: 0 0 10px; font-size: 24px; }
+          h2 { margin: 24px 0 10px; font-size: 18px; border-bottom: 1px solid #d1d5db; padding-bottom: 6px; }
+          h3 { margin: 16px 0 8px; font-size: 15px; }
+          .meta { color: #4b5563; }
+          .risk { display: inline-block; padding: 2px 8px; border-radius: 999px; background: #eff6ff; color: #1d4ed8; font-weight: 700; }
+          table { width: 100%; border-collapse: collapse; margin: 8px 0 16px; font-size: 13px; }
+          th, td { border: 1px solid #d1d5db; padding: 8px; vertical-align: top; text-align: left; }
+          th { background: #f3f4f6; }
+          img { max-width: 100%; margin-top: 8px; border: 1px solid #d1d5db; }
+          .summary { padding: 12px; background: #f8fafc; border-left: 4px solid #2563eb; }
+        </style>
+      </head>
+      <body>
+        <h1>无人机航拍图像巡检分析报告</h1>
+        <p class="meta">生成时间：${escapeHtml(generatedAt)}</p>
+        <p class="meta">图片名称：${escapeHtml(result.value.original_filename)}</p>
+
+        <h2>一、检测摘要</h2>
+        <p>检测目标总数：${result.value.total_count}</p>
+        <p>场景类型：${escapeHtml(analysis.value.scene_type)}</p>
+        <p>综合风险：<span class="risk">${escapeHtml(analysis.value.risk_level)}</span></p>
+        <p>风险评分：${analysis.value.risk_score}</p>
+        <div class="summary">${escapeHtml(result.value.report)}</div>
+
+        <h2>二、检测结果图</h2>
+        ${resultImageDataUrl ? `<img src="${resultImageDataUrl}" alt="检测结果图">` : '<p>检测结果图导出失败，请在系统中查看。</p>'}
+
+        <h2>三、类别数量统计</h2>
+        <table>
+          <thead><tr><th>类别</th><th>数量</th></tr></thead>
+          <tbody>${classRows || '<tr><td colspan="2">暂无检测目标</td></tr>'}</tbody>
+        </table>
+
+        <h2>四、异常模块分析</h2>
+        <table>
+          <thead>
+            <tr><th>模块</th><th>状态</th><th>评分</th><th>原因</th><th>建议</th></tr>
+          </thead>
+          <tbody>${moduleRows}</tbody>
+        </table>
+
+        <h2>五、综合巡检建议</h2>
+        <p>${escapeHtml(overallRecommendation.value)}</p>
+        <h3>后续操作</h3>
+        <ol>${actionItems}</ol>
+      </body>
+    </html>
+  `
+
+  const blob = new Blob(['\ufeff', html], { type: 'application/msword;charset=utf-8' })
+  const link = document.createElement('a')
+  const fileBaseName = (result.value.original_filename || 'inspection-result').replace(/\.[^.]+$/, '')
+  link.href = URL.createObjectURL(blob)
+  link.download = `${fileBaseName}-巡检分析报告.doc`
+  document.body.appendChild(link)
+  link.click()
+  document.body.removeChild(link)
+  URL.revokeObjectURL(link.href)
 }
 
 function renderCharts() {
@@ -820,7 +985,7 @@ function statusClass(status) {
   min-height: 430px;
   display: grid;
   grid-template-columns: minmax(0, 1.2fr) 420px;
-  align-items: end;
+  align-items: center;
   gap: 32px;
   padding: 34px;
   overflow: hidden;
@@ -914,6 +1079,41 @@ function statusClass(status) {
   font-size: 22px;
 }
 
+.console-main .console-risk-value {
+  display: inline-flex;
+  align-items: center;
+  min-height: 30px;
+  padding: 2px 10px;
+  border-radius: 999px;
+  font-size: 18px;
+  line-height: 1;
+}
+
+.console-main .risk-pending {
+  background: rgba(148, 163, 184, 0.18);
+  color: #e2e8f0;
+}
+
+.console-main .risk-normal {
+  background: rgba(52, 211, 153, 0.16);
+  color: #86efac;
+}
+
+.console-main .risk-low {
+  background: rgba(96, 165, 250, 0.16);
+  color: #93c5fd;
+}
+
+.console-main .risk-medium {
+  background: rgba(251, 191, 36, 0.18);
+  color: #fde68a;
+}
+
+.console-main .risk-high {
+  background: rgba(248, 113, 113, 0.18);
+  color: #fecaca;
+}
+
 .console-list {
   display: grid;
   gap: 10px;
@@ -934,6 +1134,22 @@ function statusClass(status) {
   margin: 0;
   border-radius: 999px;
   background: #60a5fa;
+}
+
+.console-list p span.risk-high {
+  background: #f87171;
+}
+
+.console-list p span.risk-medium {
+  background: #fbbf24;
+}
+
+.console-list p span.risk-low {
+  background: #38bdf8;
+}
+
+.console-list p span.risk-normal {
+  background: #34d399;
 }
 
 .workflow-card {
@@ -1055,26 +1271,35 @@ function statusClass(status) {
 
 .card h2 {
   margin: 0 0 18px;
+  color: #111827;
   font-size: 21px;
+  font-weight: 800;
 }
 
 .result-shell {
   margin-top: 22px;
 }
 
-.page-tabs {
+.result-toolbar {
   position: sticky;
   top: 0;
   z-index: 5;
   display: flex;
+  align-items: center;
+  justify-content: space-between;
   gap: 8px;
   margin-bottom: 18px;
   padding: 10px;
-  overflow-x: auto;
   border: 1px solid #dbe4f0;
   border-radius: 8px;
   background: rgba(255, 255, 255, 0.96);
   box-shadow: 0 8px 18px rgba(15, 23, 42, 0.08);
+}
+
+.page-tabs {
+  display: flex;
+  gap: 8px;
+  overflow-x: auto;
 }
 
 .page-tabs button {
@@ -1094,6 +1319,18 @@ function statusClass(status) {
   color: #ffffff;
 }
 
+.export-button {
+  flex: 0 0 auto;
+  min-height: 40px;
+  border-radius: 6px;
+  background: #047857;
+  font-weight: 700;
+}
+
+.export-button:hover {
+  background: #065f46;
+}
+
 .tab-stack {
   display: block;
 }
@@ -1101,8 +1338,10 @@ function statusClass(status) {
 .upload-box {
   display: flex;
   align-items: center;
+  justify-content: center;
   gap: 16px;
   flex-wrap: wrap;
+  text-align: center;
 }
 
 .file-picker {
@@ -1141,7 +1380,7 @@ function statusClass(status) {
   min-width: 240px;
   display: grid;
   gap: 3px;
-  text-align: left;
+  text-align: center;
 }
 
 .file-meta strong {
@@ -1184,6 +1423,54 @@ button:disabled {
   border: 1px solid #e5e7eb;
 }
 
+.compare-panel {
+  margin-bottom: 24px;
+  text-align: left;
+}
+
+.compare-panel h3 {
+  margin: 0 0 12px;
+  color: #111827;
+  font-size: 17px;
+  font-weight: 800;
+}
+
+.compare-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 16px;
+}
+
+.compare-grid div {
+  display: grid;
+  gap: 8px;
+  min-width: 0;
+}
+
+.compare-grid span {
+  color: #475569;
+  font-size: 13px;
+  font-weight: 800;
+}
+
+.compare-grid img {
+  width: 100%;
+  aspect-ratio: 4 / 3;
+  object-fit: contain;
+  border: 1px solid #dbe4f0;
+  border-radius: 8px;
+  background: #f8fafc;
+}
+
+.compare-empty {
+  min-height: 220px;
+  display: grid;
+  place-items: center;
+  border: 1px dashed #cbd5e1;
+  border-radius: 8px;
+  background: #f8fafc;
+}
+
 .result-layout {
   display: grid;
   grid-template-columns: 1.5fr 1fr;
@@ -1192,6 +1479,13 @@ button:disabled {
 
 .summary-panel p {
   margin: 10px 0;
+}
+
+.image-panel h3,
+.summary-panel h3,
+.preview h3 {
+  color: #111827;
+  font-weight: 800;
 }
 
 .report {
@@ -1511,6 +1805,7 @@ th {
   }
 
   .result-layout,
+  .compare-grid,
   .grid,
   .module-grid,
   .metric-grid,
@@ -1529,6 +1824,15 @@ th {
     width: 100%;
     justify-content: center;
     overflow-x: auto;
+  }
+
+  .result-toolbar {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .export-button {
+    width: 100%;
   }
 
   .welcome-band {
