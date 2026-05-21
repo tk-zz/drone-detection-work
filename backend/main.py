@@ -1,4 +1,4 @@
-from fastapi import Depends, FastAPI, Header, HTTPException, UploadFile, File
+from fastapi import Depends, FastAPI, Form, Header, HTTPException, UploadFile, File
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from ultralytics import YOLO
@@ -35,6 +35,11 @@ DB_PATH = BASE_DIR / "app.db"
 TOKEN_HOURS = 12
 SCENE_MODEL_PATH = MODEL_DIR / "best.pt"
 VISDRONE_MODEL_PATH = MODEL_DIR / "yolov8x-visdrone.pt"
+DETECTION_MODES = {
+    "fusion": "粗细粒度融合检测",
+    "scene": "粗粒度场景检测",
+    "fine": "细粒度目标检测",
+}
 
 VISDRONE_VEHICLE_CLASSES = {
     "bicycle",
@@ -583,7 +588,16 @@ def logout(authorization: str = Header(default="")):
 
 
 @app.post("/detect")
-async def detect_image(file: UploadFile = File(...), current_user=Depends(get_current_user)):
+async def detect_image(
+    file: UploadFile = File(...),
+    detection_mode: str = Form(default="fusion"),
+    current_user=Depends(get_current_user),
+):
+    if detection_mode not in DETECTION_MODES:
+        raise HTTPException(status_code=400, detail="不支持的检测模式")
+    if detection_mode == "fine" and visdrone_model is None:
+        raise HTTPException(status_code=503, detail="细粒度 VisDrone 模型未加载，暂不能使用细粒度检测")
+
     # 生成唯一文件名，避免重复覆盖
     file_ext = Path(file.filename).suffix
     file_id = str(uuid.uuid4())
@@ -595,10 +609,23 @@ async def detect_image(file: UploadFile = File(...), current_user=Depends(get_cu
     with open(upload_path, "wb") as buffer:
         shutil.copyfileobj(file.file, buffer)
 
-    # 多模型融合检测：场景模型识别道路/建筑/树木/水域等，VisDrone 模型补充行人和细粒度车辆。
-    scene_detections, image_width, image_height = run_yolo_detection(scene_model, upload_path, "scene", conf=0.25)
+    # 根据检测模式选择模型：场景模型识别道路/建筑/树木/水域等，VisDrone 模型补充行人和细粒度车辆。
+    scene_detections = []
     fine_detections = []
-    if visdrone_model:
+    image_width = 0
+    image_height = 0
+    models_used = []
+
+    if detection_mode in {"fusion", "scene"}:
+        scene_detections, image_width, image_height = run_yolo_detection(
+            scene_model,
+            upload_path,
+            "scene",
+            conf=0.25,
+        )
+        models_used.append("scene")
+
+    if detection_mode in {"fusion", "fine"} and visdrone_model:
         fine_detections, fine_width, fine_height = run_yolo_detection(
             visdrone_model,
             upload_path,
@@ -607,6 +634,7 @@ async def detect_image(file: UploadFile = File(...), current_user=Depends(get_cu
         )
         image_width = image_width or fine_width
         image_height = image_height or fine_height
+        models_used.append("visdrone")
 
     detections = scene_detections + fine_detections
     draw_detection_result(upload_path, result_img_path, detections)
@@ -624,14 +652,14 @@ async def detect_image(file: UploadFile = File(...), current_user=Depends(get_cu
         main_class = max(class_count, key=class_count.get)
         fine_target_count = len(fine_detections)
         report = (
-            f"本次图像共检测到 {len(detections)} 个目标。"
+            f"本次采用{DETECTION_MODES[detection_mode]}，共检测到 {len(detections)} 个目标。"
             f"其中场景要素 {len(scene_detections)} 个，细粒度目标 {fine_target_count} 个。"
             f"其中数量最多的类别为 {main_class}，共 {class_count[main_class]} 个。"
             f"{analysis['summary']}"
         )
     else:
         report = (
-            "本次图像未检测到自训练航拍场景模型可识别的目标。"
+            f"本次采用{DETECTION_MODES[detection_mode]}，未检测到当前模型可识别的目标。"
             "可能原因是图像中目标不属于当前模型类别，或目标过小、置信度较低。"
         )
 
@@ -639,6 +667,9 @@ async def detect_image(file: UploadFile = File(...), current_user=Depends(get_cu
     result_data = {
         "image_id": file_id,
         "original_filename": file.filename,
+        "detection_mode": detection_mode,
+        "detection_mode_label": DETECTION_MODES[detection_mode],
+        "models_used": models_used,
         "total_count": len(detections),
         "class_count": class_count,
         "detections": detections,

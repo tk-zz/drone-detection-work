@@ -32,18 +32,12 @@
         <span>当前用户：{{ currentUser?.username }}</span>
         <button type="button" @click="logout">退出登录</button>
       </div>
-      <h1>无人机航拍场景异常检测与可视分析系统</h1>
-      <nav class="main-nav" aria-label="系统主导航">
-        <button
-          v-for="item in mainPages"
-          :key="item.key"
-          :class="{ active: activePage === item.key }"
-          type="button"
-          @click="switchMainPage(item.key)"
-        >
-          {{ item.label }}
-        </button>
-      </nav>
+      <p class="system-name">无人机航拍场景异常检测与可视分析系统</p>
+      <h1>{{ currentPageTitle }}</h1>
+      <div v-if="activePage !== 'home'" class="page-actions">
+        <button type="button" @click="goBack">返回</button>
+        <button type="button" @click="goHome">首页</button>
+      </div>
     </header>
 
     <main class="container">
@@ -134,20 +128,46 @@
       <section v-if="activePage === 'upload'" class="card upload-card">
         <h2>图片上传</h2>
 
-        <div class="upload-box">
-          <label class="file-picker">
+        <div
+          :class="['dropzone', { dragging: isDraggingFile, ready: selectedFile }]"
+          @dragenter.prevent="handleDragEnter"
+          @dragover.prevent="handleDragOver"
+          @dragleave.prevent="handleDragLeave"
+          @drop.prevent="handleFileDrop"
+        >
+          <label class="dropzone-picker">
             <input type="file" accept="image/*" @change="handleFileChange" />
-            <span>选择图片</span>
+            <span class="dropzone-icon">+</span>
+            <strong>{{ selectedFile ? selectedFile.name : '拖拽航拍图片到这里' }}</strong>
+            <small>
+              {{ selectedFile ? '已选择图片，可重新拖入或点击更换' : '支持 jpg、png 等常见图片格式，也可以点击选择图片' }}
+            </small>
           </label>
+        </div>
 
-          <div class="file-meta">
-            <strong>{{ selectedFile ? selectedFile.name : '未选择图片' }}</strong>
-            <small>{{ selectedFile ? '支持 jpg、png 等常见图片格式' : '请选择一张航拍图片进行检测' }}</small>
-          </div>
-
+        <div class="upload-actions">
           <button :disabled="!selectedFile || loading" @click="detectImage">
             {{ loading ? '检测中...' : '开始智能识别' }}
           </button>
+        </div>
+
+        <div class="mode-panel">
+          <div class="mode-copy">
+            <span>检测策略</span>
+            <strong>{{ selectedDetectionMode.label }}</strong>
+            <small>{{ selectedDetectionMode.hint }}</small>
+          </div>
+
+          <div class="mode-selector" aria-label="检测模式选择">
+            <label
+              v-for="mode in detectionModes"
+              :key="mode.value"
+              :class="{ active: detectionMode === mode.value }"
+            >
+              <input v-model="detectionMode" type="radio" name="detection-mode" :value="mode.value" />
+              <span>{{ mode.shortLabel }}</span>
+            </label>
+          </div>
         </div>
 
         <div v-if="previewUrl" class="preview">
@@ -204,6 +224,8 @@
             <div class="summary-panel">
               <h3>检测摘要</h3>
               <p>图片名称：{{ result.original_filename }}</p>
+              <p>检测模式：{{ result.detection_mode_label || selectedDetectionMode.label }}</p>
+              <p v-if="result.models_used?.length">启用模型：{{ formatModelsUsed(result.models_used) }}</p>
               <p>检测目标总数：{{ result.total_count }}</p>
               <p v-if="analysis">场景类型：{{ analysis.scene_type }}</p>
               <p v-if="analysis">综合风险：<span :class="['risk-badge', riskClass(analysis.risk_level)]">{{ analysis.risk_level }}</span></p>
@@ -352,6 +374,7 @@
               <tr>
                 <th>序号</th>
                 <th>类别</th>
+                <th>模型来源</th>
                 <th>置信度</th>
                 <th>面积</th>
                 <th>坐标</th>
@@ -361,6 +384,7 @@
               <tr v-for="(item, index) in result.detections" :key="index">
                 <td>{{ index + 1 }}</td>
                 <td>{{ item.class_name }}</td>
+                <td>{{ modelRoleLabel(item.model_role) }}</td>
                 <td>{{ (item.confidence * 100).toFixed(2) }}%</td>
                 <td>{{ item.area }}</td>
                 <td>
@@ -401,6 +425,9 @@ const previewUrl = ref('')
 const result = ref(null)
 const loading = ref(false)
 const errorMessage = ref('')
+const detectionMode = ref('fusion')
+const isDraggingFile = ref(false)
+const dragDepth = ref(0)
 const activePage = ref('home')
 const activeTab = ref('overview')
 const authToken = ref(localStorage.getItem('auth_token') || '')
@@ -416,11 +443,38 @@ const barChartRef = ref(null)
 const pieChartRef = ref(null)
 
 const analysis = computed(() => result.value?.analysis || null)
-const mainPages = [
-  { key: 'home', label: '系统首页' },
-  { key: 'upload', label: '图片上传' },
-  { key: 'results', label: '检测结果' }
+const detectionModes = [
+  {
+    value: 'fusion',
+    label: '融合检测（推荐）',
+    shortLabel: '融合',
+    description: '场景要素 + 小目标',
+    hint: '融合检测会同时调用粗粒度场景模型和细粒度目标模型，适合作为默认巡检模式。'
+  },
+  {
+    value: 'scene',
+    label: '粗粒度场景检测',
+    shortLabel: '粗粒度',
+    description: '道路、水域、建筑、树木',
+    hint: '粗粒度模型主要用于场景理解，当前结果更适合作为道路、水域等区域识别参考。'
+  },
+  {
+    value: 'fine',
+    label: '细粒度目标检测',
+    shortLabel: '细粒度',
+    description: '车辆、行人等小目标',
+    hint: '细粒度模型主要识别车辆和人员，缺少道路、水域语义时部分异常模块会以复核提示为主。'
+  }
 ]
+const selectedDetectionMode = computed(() => {
+  return detectionModes.find(mode => mode.value === detectionMode.value) || detectionModes[0]
+})
+const pageTitles = {
+  home: '系统首页',
+  upload: '图片上传',
+  results: '检测结果'
+}
+const currentPageTitle = computed(() => pageTitles[activePage.value] || '系统首页')
 const tabs = [
   { key: 'overview', label: '检测总览' },
   { key: 'analysis', label: '异常分析' },
@@ -524,7 +578,16 @@ let pieChart = null
 
 function handleFileChange(event) {
   const file = event.target.files[0]
+  setSelectedFile(file)
+  event.target.value = ''
+}
+
+function setSelectedFile(file) {
   if (!file) return
+  if (!file.type.startsWith('image/')) {
+    errorMessage.value = '请上传 jpg、png 等图片文件'
+    return
+  }
 
   selectedFile.value = file
   result.value = null
@@ -536,6 +599,29 @@ function handleFileChange(event) {
   }
 
   previewUrl.value = URL.createObjectURL(file)
+}
+
+function handleDragEnter() {
+  dragDepth.value += 1
+  isDraggingFile.value = true
+}
+
+function handleDragOver() {
+  isDraggingFile.value = true
+}
+
+function handleDragLeave() {
+  dragDepth.value = Math.max(0, dragDepth.value - 1)
+  if (dragDepth.value === 0) {
+    isDraggingFile.value = false
+  }
+}
+
+function handleFileDrop(event) {
+  dragDepth.value = 0
+  isDraggingFile.value = false
+  const file = event.dataTransfer?.files?.[0]
+  setSelectedFile(file)
 }
 
 async function detectImage() {
@@ -551,6 +637,7 @@ async function detectImage() {
   try {
     const formData = new FormData()
     formData.append('file', selectedFile.value)
+    formData.append('detection_mode', detectionMode.value)
 
     const response = await axios.post(`${backendBaseUrl}/detect`, formData, {
       headers: {
@@ -560,7 +647,7 @@ async function detectImage() {
     })
 
     result.value = response.data
-    activePage.value = 'results'
+    await switchMainPage('results')
     activeTab.value = 'overview'
   } catch (error) {
     console.error(error)
@@ -568,7 +655,7 @@ async function detectImage() {
       clearAuth()
       errorMessage.value = '登录已过期，请重新登录'
     } else {
-      errorMessage.value = '检测失败，请确认后端服务是否正在运行，地址是否为 http://127.0.0.1:8000'
+      errorMessage.value = error.response?.data?.detail || '检测失败，请确认后端服务是否正在运行，地址是否为 http://127.0.0.1:8000'
     }
   } finally {
     loading.value = false
@@ -622,6 +709,18 @@ async function switchMainPage(pageKey) {
     await nextTick()
     renderCharts()
   }
+}
+
+async function goBack() {
+  if (activePage.value === 'results') {
+    await switchMainPage('upload')
+    return
+  }
+  await switchMainPage('home')
+}
+
+async function goHome() {
+  await switchMainPage('home')
 }
 
 async function switchTab(tabKey) {
@@ -818,6 +917,20 @@ function riskClass(level) {
 function statusClass(status) {
   return riskClass(status)
 }
+
+function modelRoleLabel(role) {
+  if (role === 'scene') return '粗粒度场景模型'
+  if (role === 'fine_target') return '细粒度目标模型'
+  return '未知模型'
+}
+
+function formatModelsUsed(models) {
+  const labels = {
+    scene: '粗粒度场景模型',
+    visdrone: '细粒度 VisDrone 模型'
+  }
+  return models.map(model => labels[model] || model).join('、')
+}
 </script>
 
 <style scoped>
@@ -916,7 +1029,7 @@ function statusClass(status) {
 
 .header {
   position: relative;
-  padding: 36px 24px;
+  padding: 34px 24px 30px;
   text-align: center;
   background: linear-gradient(135deg, #1e3a8a, #2563eb);
   color: white;
@@ -942,32 +1055,41 @@ function statusClass(status) {
 }
 
 .header h1 {
+  margin: 8px 0 0;
+  color: #ffffff;
+  font-size: 34px;
+  font-weight: 700;
+}
+
+.system-name {
   margin: 0;
-  font-size: 30px;
-  font-weight: 700;
+  color: #bfdbfe;
+  font-size: 15px;
+  font-weight: 800;
+  letter-spacing: 0.08em;
 }
 
-.main-nav {
-  display: inline-flex;
+.page-actions {
+  position: absolute;
+  left: 24px;
+  top: 24px;
+  display: flex;
   gap: 8px;
-  margin-top: 22px;
-  padding: 6px;
-  border-radius: 8px;
-  background: rgba(255, 255, 255, 0.14);
 }
 
-.main-nav button {
-  min-width: 96px;
-  padding: 8px 14px;
+.page-actions button {
+  min-width: 70px;
+  padding: 8px 12px;
   border-radius: 6px;
-  background: transparent;
-  color: #dbeafe;
+  background: rgba(255, 255, 255, 0.16);
+  color: #ffffff;
+  font-size: 13px;
   font-weight: 700;
 }
 
-.main-nav button.active {
-  background: #ffffff;
-  color: #1e3a8a;
+.page-actions button:hover,
+.user-bar button:hover {
+  background: rgba(255, 255, 255, 0.24);
 }
 
 .container {
@@ -1335,66 +1457,170 @@ function statusClass(status) {
   display: block;
 }
 
-.upload-box {
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  gap: 16px;
-  flex-wrap: wrap;
+.dropzone {
+  display: grid;
+  place-items: center;
+  min-height: 190px;
+  border: 2px dashed #bfdbfe;
+  border-radius: 10px;
+  background: #f8fbff;
   text-align: center;
-}
-
-.file-picker {
-  position: relative;
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  min-height: 44px;
-  padding: 0 18px;
-  border: 1px solid #cbd5e1;
-  border-radius: 8px;
-  background: #ffffff;
-  color: #1e3a8a;
-  font-weight: 700;
-  cursor: pointer;
   transition:
     border-color 0.2s,
     box-shadow 0.2s,
-    background 0.2s;
+    background 0.2s,
+    transform 0.2s;
 }
 
-.file-picker:hover {
+.dropzone.dragging {
   border-color: #2563eb;
   background: #eff6ff;
-  box-shadow: 0 6px 16px rgba(37, 99, 235, 0.12);
+  box-shadow: 0 14px 30px rgba(37, 99, 235, 0.16);
+  transform: translateY(-1px);
 }
 
-.file-picker input {
-  position: absolute;
-  inset: 0;
-  opacity: 0;
+.dropzone.ready {
+  border-color: #60a5fa;
+  background: #ffffff;
+}
+
+.dropzone-picker {
+  position: relative;
+  width: 100%;
+  min-height: 190px;
+  box-sizing: border-box;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex-direction: column;
+  gap: 8px;
+  padding: 28px;
+  color: #1e3a8a;
   cursor: pointer;
 }
 
-.file-meta {
-  min-width: 240px;
+.dropzone-icon {
   display: grid;
-  gap: 3px;
-  text-align: center;
+  place-items: center;
+  width: 46px;
+  height: 46px;
+  border-radius: 999px;
+  background: #dbeafe;
+  color: #1d4ed8;
+  font-size: 30px;
+  font-weight: 400;
+  line-height: 1;
 }
 
-.file-meta strong {
-  max-width: 360px;
+.dropzone-picker strong {
+  max-width: min(560px, 100%);
   overflow: hidden;
   color: #111827;
-  font-size: 15px;
+  font-size: 18px;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
 
-.file-meta small {
+.dropzone-picker small {
   color: #64748b;
+  font-size: 13px;
+}
+
+.dropzone-picker input {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  opacity: 0;
+  pointer-events: none;
+  cursor: pointer;
+}
+
+.upload-actions {
+  margin-top: 16px;
+  text-align: center;
+}
+
+.mode-panel {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 18px;
+  margin-top: 18px;
+  padding: 14px 16px;
+  border: 1px solid #dbe4f0;
+  border-radius: 10px;
+  background: #f8fafc;
+  text-align: left;
+}
+
+.mode-copy {
+  min-width: 0;
+  display: grid;
+  gap: 4px;
+}
+
+.mode-copy span {
+  color: #2563eb;
   font-size: 12px;
+  font-weight: 800;
+  letter-spacing: 0.06em;
+}
+
+.mode-copy strong {
+  color: #111827;
+  font-size: 16px;
+}
+
+.mode-copy small {
+  max-width: 760px;
+  color: #64748b;
+  font-size: 13px;
+  line-height: 1.6;
+}
+
+.mode-selector {
+  flex: 0 0 auto;
+  display: inline-flex;
+  gap: 4px;
+  padding: 4px;
+  border: 1px solid #dbe4f0;
+  border-radius: 999px;
+  background: #ffffff;
+}
+
+.mode-selector label {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 78px;
+  padding: 8px 12px;
+  border-radius: 999px;
+  cursor: pointer;
+  transition:
+    color 0.2s,
+    background 0.2s;
+}
+
+.mode-selector label.active {
+  background: #2563eb;
+  box-shadow: 0 6px 14px rgba(37, 99, 235, 0.18);
+}
+
+.mode-selector input {
+  position: absolute;
+  opacity: 0;
+  pointer-events: none;
+}
+
+.mode-selector span {
+  color: #475569;
+  font-size: 13px;
+  font-weight: 800;
+}
+
+.mode-selector label.active span {
+  color: #ffffff;
 }
 
 button {
@@ -1820,10 +2046,37 @@ th {
     flex-direction: column;
   }
 
-  .main-nav {
+  .header {
+    padding-top: 78px;
+  }
+
+  .page-actions {
+    left: 18px;
+    top: 18px;
+  }
+
+  .mode-panel {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .mode-selector {
     width: 100%;
-    justify-content: center;
-    overflow-x: auto;
+  }
+
+  .mode-selector label {
+    flex: 1;
+    min-width: 0;
+  }
+
+  .dropzone,
+  .dropzone-picker {
+    min-height: 160px;
+  }
+
+  .dropzone-picker strong {
+    max-width: 260px;
+    font-size: 16px;
   }
 
   .result-toolbar {
