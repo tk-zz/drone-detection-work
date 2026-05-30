@@ -49,7 +49,10 @@
             <p>
               系统面向航拍图像巡检场景，提供目标识别、场景理解、异常分析、统计图表和巡检建议生成能力。
             </p>
-            <button type="button" @click="switchMainPage('upload')">开始上传图片</button>
+            <div class="welcome-actions">
+              <button type="button" @click="switchMainPage('upload')">开始上传图片</button>
+              <button class="secondary-button" type="button" @click="switchMainPage('logs')">查看检测日志</button>
+            </div>
           </div>
           <div class="console-preview" aria-label="系统能力预览">
             <div class="console-header">
@@ -178,6 +181,49 @@
         <p v-if="errorMessage" class="error">{{ errorMessage }}</p>
       </section>
 
+      <section v-if="activePage === 'logs'" class="card log-card">
+        <div class="section-heading">
+          <div>
+            <h2>检测日志</h2>
+            <p>记录每一次图片检测的操作时间、检测模式、目标数量和分析结果。</p>
+          </div>
+          <button type="button" :disabled="logsLoading" @click="fetchDetectionLogs">
+            {{ logsLoading ? '刷新中...' : '刷新日志' }}
+          </button>
+        </div>
+
+        <p v-if="logsError" class="error">{{ logsError }}</p>
+        <p v-else-if="logsLoading" class="empty">正在加载检测日志...</p>
+
+        <div v-else-if="detectionLogs.length" class="log-list">
+          <article v-for="log in detectionLogs" :key="log.id" class="log-item">
+            <div class="log-main">
+              <img :src="backendBaseUrl + log.result_image_url" alt="检测结果缩略图" />
+              <div>
+                <h3>{{ log.original_filename }}</h3>
+                <p>{{ formatDateTime(log.created_at) }} · {{ log.detection_mode_label }}</p>
+                <p>{{ log.scene_type }}，共检测到 {{ log.total_count }} 个目标。</p>
+                <div class="log-tags">
+                  <span :class="['risk-badge', riskClass(log.risk_level)]">{{ log.risk_level }}</span>
+                  <span>风险评分 {{ log.risk_score }}</span>
+                  <span v-if="log.models_used?.length">{{ formatModelsUsed(log.models_used) }}</span>
+                </div>
+              </div>
+            </div>
+
+            <div class="log-report">
+              {{ log.report }}
+            </div>
+          </article>
+        </div>
+
+        <div v-else class="empty log-empty">
+          <h3>暂无检测日志</h3>
+          <p>完成一次图片检测后，系统会在这里自动生成日志记录。</p>
+          <button type="button" @click="switchMainPage('upload')">去上传图片</button>
+        </div>
+      </section>
+
       <section v-if="activePage === 'results' && result" class="result-shell">
         <div class="result-toolbar">
           <nav class="page-tabs" aria-label="检测结果导航">
@@ -205,12 +251,23 @@
             <div class="compare-grid">
               <div>
                 <span>原始图片</span>
-                <img v-if="previewUrl" :src="previewUrl" alt="原始图片" />
+                <button
+                  v-if="previewUrl"
+                  class="image-detail-trigger"
+                  type="button"
+                  @click="openImageDetail('original')"
+                >
+                  <img :src="previewUrl" alt="原始图片" />
+                  <span class="image-detail-badge">点击查看详情</span>
+                </button>
                 <p v-else class="empty compare-empty">当前会话暂无原始图片预览。</p>
               </div>
               <div>
                 <span>检测结果图</span>
-                <img :src="backendBaseUrl + result.result_image_url" alt="检测结果图" />
+                <button class="image-detail-trigger" type="button" @click="openImageDetail('result')">
+                  <img :src="backendBaseUrl + result.result_image_url" alt="检测结果图" />
+                  <span class="image-detail-badge">点击查看详情</span>
+                </button>
               </div>
             </div>
           </section>
@@ -218,7 +275,10 @@
           <div class="result-layout">
             <div class="image-panel">
               <h3>检测结果图</h3>
-              <img :src="backendBaseUrl + result.result_image_url" alt="检测结果图" />
+              <button class="image-detail-trigger image-panel-trigger" type="button" @click="openImageDetail('result')">
+                <img :src="backendBaseUrl + result.result_image_url" alt="检测结果图" />
+                <span class="image-detail-badge">点击查看详情</span>
+              </button>
             </div>
 
             <div class="summary-panel">
@@ -409,6 +469,51 @@
         <button type="button" @click="switchMainPage('upload')">去上传图片</button>
       </section>
     </main>
+
+    <div
+      v-if="imageDetailOpen"
+      class="image-detail-modal"
+      role="dialog"
+      aria-modal="true"
+      :aria-label="imageDetailTitle"
+      @click.self="closeImageDetail"
+    >
+      <div class="image-detail-dialog">
+        <div class="image-detail-header">
+          <div>
+            <span>图片详情</span>
+            <h2>{{ imageDetailTitle }}</h2>
+          </div>
+          <button class="image-detail-close" type="button" aria-label="关闭图片详情" @click="closeImageDetail">×</button>
+        </div>
+
+        <div class="image-detail-body">
+          <div class="image-detail-viewer">
+            <img :src="imageDetailSrc" :alt="imageDetailTitle" />
+          </div>
+
+          <aside class="image-detail-info">
+            <h3>检测信息</h3>
+            <p>图片名称：{{ result?.original_filename || '当前图片' }}</p>
+            <p v-if="result">检测模式：{{ result.detection_mode_label || selectedDetectionMode.label }}</p>
+            <p v-if="imageDetailType === 'result' && result">目标总数：{{ result.total_count }}</p>
+            <p v-if="imageDetailType === 'original'">原始图片用于和检测结果进行位置对照。</p>
+
+            <div v-if="imageDetailType === 'result'" class="detail-detection-list">
+              <h3>目标清单</h3>
+              <ul v-if="result?.detections?.length">
+                <li v-for="(item, index) in result.detections" :key="`${item.class_name}-${index}`">
+                  <strong>{{ item.class_name }}</strong>
+                  <span>{{ modelRoleLabel(item.model_role) }}</span>
+                  <small>置信度 {{ formatConfidence(item.confidence) }}</small>
+                </li>
+              </ul>
+              <p v-else class="empty">暂无检测目标。</p>
+            </div>
+          </aside>
+        </div>
+      </div>
+    </div>
     </template>
   </div>
 </template>
@@ -434,6 +539,11 @@ const authToken = ref(localStorage.getItem('auth_token') || '')
 const currentUser = ref(JSON.parse(localStorage.getItem('auth_user') || 'null'))
 const loginLoading = ref(false)
 const loginError = ref('')
+const imageDetailOpen = ref(false)
+const imageDetailType = ref('result')
+const detectionLogs = ref([])
+const logsLoading = ref(false)
+const logsError = ref('')
 const loginForm = ref({
   username: 'admin',
   password: 'admin123'
@@ -443,20 +553,20 @@ const barChartRef = ref(null)
 const pieChartRef = ref(null)
 
 const analysis = computed(() => result.value?.analysis || null)
+const imageDetailTitle = computed(() => {
+  return imageDetailType.value === 'original' ? '原始图片' : '检测结果图'
+})
+const imageDetailSrc = computed(() => {
+  if (imageDetailType.value === 'original') return previewUrl.value
+  return result.value?.result_image_url ? `${backendBaseUrl}${result.value.result_image_url}` : ''
+})
 const detectionModes = [
   {
     value: 'fusion',
     label: '融合检测（推荐）',
     shortLabel: '融合',
     description: '场景要素 + 小目标',
-    hint: '融合检测会同时调用粗粒度场景模型和细粒度目标模型，适合作为默认巡检模式。'
-  },
-  {
-    value: 'scene',
-    label: '粗粒度场景检测',
-    shortLabel: '粗粒度',
-    description: '道路、水域、建筑、树木',
-    hint: '粗粒度模型主要用于场景理解，当前结果更适合作为道路、水域等区域识别参考。'
+    hint: '默认巡检策略会自动结合场景语义和细粒度目标，用于生成完整的异常分析与巡检建议。'
   },
   {
     value: 'fine',
@@ -472,7 +582,8 @@ const selectedDetectionMode = computed(() => {
 const pageTitles = {
   home: '系统首页',
   upload: '图片上传',
-  results: '检测结果'
+  results: '检测结果',
+  logs: '检测日志'
 }
 const currentPageTitle = computed(() => pageTitles[activePage.value] || '系统首页')
 const tabs = [
@@ -647,6 +758,7 @@ async function detectImage() {
     })
 
     result.value = response.data
+    prependDetectionLogFromResult(response.data)
     await switchMainPage('results')
     activeTab.value = 'overview'
   } catch (error) {
@@ -699,12 +811,16 @@ async function logout() {
 function clearAuth() {
   authToken.value = ''
   currentUser.value = null
+  detectionLogs.value = []
   localStorage.removeItem('auth_token')
   localStorage.removeItem('auth_user')
 }
 
 async function switchMainPage(pageKey) {
   activePage.value = pageKey
+  if (pageKey === 'logs') {
+    await fetchDetectionLogs()
+  }
   if (pageKey === 'results' && activeTab.value === 'charts') {
     await nextTick()
     renderCharts()
@@ -729,6 +845,59 @@ async function switchTab(tabKey) {
     await nextTick()
     renderCharts()
   }
+}
+
+async function fetchDetectionLogs() {
+  logsLoading.value = true
+  logsError.value = ''
+
+  try {
+    const response = await axios.get(`${backendBaseUrl}/logs`, {
+      headers: {
+        Authorization: `Bearer ${authToken.value}`
+      }
+    })
+    detectionLogs.value = response.data.logs || []
+  } catch (error) {
+    console.error(error)
+    if (error.response?.status === 401) {
+      clearAuth()
+      logsError.value = '登录已过期，请重新登录'
+    } else {
+      logsError.value = error.response?.data?.detail || '检测日志加载失败，请确认后端服务是否正在运行'
+    }
+  } finally {
+    logsLoading.value = false
+  }
+}
+
+function prependDetectionLogFromResult(data) {
+  if (!data?.log_id) return
+
+  const log = {
+    id: data.log_id,
+    user_id: currentUser.value?.id,
+    username: currentUser.value?.username,
+    image_id: data.image_id,
+    original_filename: data.original_filename,
+    detection_mode: data.detection_mode,
+    detection_mode_label: data.detection_mode_label,
+    models_used: data.models_used || [],
+    total_count: data.total_count,
+    risk_level: data.analysis?.risk_level || '正常',
+    risk_score: data.analysis?.risk_score ?? 0,
+    scene_type: data.analysis?.scene_type || '未识别到明确巡检场景',
+    class_count: data.class_count || {},
+    report: data.report || '',
+    result_image_url: data.result_image_url,
+    result_json_url: data.result_json_url,
+    created_at: new Date().toISOString()
+  }
+
+  detectionLogs.value = [
+    log,
+    ...detectionLogs.value.filter(item => item.id !== log.id)
+  ]
 }
 
 function escapeHtml(value) {
@@ -907,6 +1076,15 @@ function renderCharts() {
   }
 }
 
+function openImageDetail(type) {
+  imageDetailType.value = type
+  imageDetailOpen.value = true
+}
+
+function closeImageDetail() {
+  imageDetailOpen.value = false
+}
+
 function riskClass(level) {
   if (level === '高风险' || level === '严重异常') return 'risk-high'
   if (level === '中风险' || level === '中度异常') return 'risk-medium'
@@ -930,6 +1108,21 @@ function formatModelsUsed(models) {
     visdrone: '细粒度 VisDrone 模型'
   }
   return models.map(model => labels[model] || model).join('、')
+}
+
+function formatConfidence(confidence) {
+  return `${(Number(confidence) * 100).toFixed(1)}%`
+}
+
+function formatDateTime(value) {
+  if (!value) return '--'
+  return new Date(value).toLocaleString('zh-CN', {
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit',
+    hour: '2-digit',
+    minute: '2-digit'
+  })
 }
 </script>
 
@@ -1145,6 +1338,19 @@ function formatModelsUsed(models) {
   margin: 14px 0 22px;
   color: #e0f2fe;
   line-height: 1.8;
+}
+
+.welcome-actions {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: center;
+  gap: 12px;
+}
+
+.secondary-button {
+  border: 1px solid rgba(255, 255, 255, 0.32);
+  background: rgba(255, 255, 255, 0.14);
+  color: #ffffff;
 }
 
 .console-preview {
@@ -1679,13 +1885,50 @@ button:disabled {
   font-weight: 800;
 }
 
-.compare-grid img {
+.image-detail-trigger {
+  position: relative;
+  display: block;
   width: 100%;
-  aspect-ratio: 4 / 3;
-  object-fit: contain;
+  overflow: hidden;
+  padding: 0;
   border: 1px solid #dbe4f0;
   border-radius: 8px;
   background: #f8fafc;
+  cursor: zoom-in;
+  text-align: left;
+}
+
+.image-detail-trigger img {
+  width: 100%;
+  aspect-ratio: 4 / 3;
+  object-fit: contain;
+  display: block;
+  border: 0;
+  border-radius: 0;
+}
+
+.image-detail-trigger:hover,
+.image-detail-trigger:focus-visible {
+  border-color: #2563eb;
+  box-shadow: 0 12px 28px rgba(37, 99, 235, 0.16);
+  outline: none;
+}
+
+.image-detail-trigger .image-detail-badge {
+  position: absolute;
+  right: 12px;
+  bottom: 12px;
+  padding: 6px 10px;
+  border-radius: 999px;
+  background: rgba(15, 23, 42, 0.78);
+  color: #ffffff;
+  font-size: 12px;
+  font-weight: 800;
+}
+
+.image-panel-trigger {
+  border-color: #e5e7eb;
+  border-radius: 12px;
 }
 
 .compare-empty {
@@ -1720,6 +1963,223 @@ button:disabled {
   padding: 14px;
   border-radius: 8px;
   line-height: 1.8;
+}
+
+.log-card {
+  text-align: left;
+}
+
+.log-list {
+  display: grid;
+  gap: 14px;
+}
+
+.log-item {
+  display: grid;
+  gap: 12px;
+  padding: 14px;
+  border: 1px solid #dbe4f0;
+  border-radius: 8px;
+  background: #ffffff;
+}
+
+.log-main {
+  display: grid;
+  grid-template-columns: 180px minmax(0, 1fr);
+  gap: 14px;
+  align-items: start;
+}
+
+.log-main img {
+  width: 100%;
+  aspect-ratio: 4 / 3;
+  object-fit: cover;
+  border: 1px solid #e5e7eb;
+  border-radius: 8px;
+  background: #f8fafc;
+}
+
+.log-main h3 {
+  margin: 0 0 6px;
+  color: #111827;
+  font-size: 17px;
+}
+
+.log-main p {
+  margin: 5px 0;
+  color: #475569;
+  line-height: 1.6;
+}
+
+.log-tags {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 10px;
+}
+
+.log-tags span:not(.risk-badge) {
+  display: inline-flex;
+  align-items: center;
+  min-height: 26px;
+  padding: 2px 10px;
+  border-radius: 999px;
+  background: #eef2f7;
+  color: #475569;
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.log-report {
+  padding: 12px;
+  border-radius: 8px;
+  background: #f8fafc;
+  color: #475569;
+  line-height: 1.7;
+}
+
+.log-empty {
+  display: grid;
+  place-items: center;
+  gap: 10px;
+  min-height: 260px;
+  border: 1px dashed #cbd5e1;
+  border-radius: 8px;
+  background: #f8fafc;
+  text-align: center;
+}
+
+.log-empty h3,
+.log-empty p {
+  margin: 0;
+}
+
+.image-detail-modal {
+  position: fixed;
+  inset: 0;
+  z-index: 100;
+  display: grid;
+  place-items: center;
+  padding: 24px;
+  background: rgba(15, 23, 42, 0.72);
+}
+
+.image-detail-dialog {
+  width: min(1320px, 100%);
+  max-height: min(860px, calc(100vh - 48px));
+  display: grid;
+  grid-template-rows: auto minmax(0, 1fr);
+  overflow: hidden;
+  border-radius: 12px;
+  background: #ffffff;
+  box-shadow: 0 24px 80px rgba(15, 23, 42, 0.36);
+}
+
+.image-detail-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  padding: 16px 18px;
+  border-bottom: 1px solid #e5e7eb;
+}
+
+.image-detail-header span {
+  color: #2563eb;
+  font-size: 12px;
+  font-weight: 800;
+}
+
+.image-detail-header h2 {
+  margin: 2px 0 0;
+  color: #111827;
+  font-size: 20px;
+}
+
+.image-detail-close {
+  width: 38px;
+  height: 38px;
+  padding: 0;
+  border-radius: 999px;
+  background: #eef2f7;
+  color: #0f172a;
+  font-size: 26px;
+  line-height: 1;
+}
+
+.image-detail-body {
+  min-height: 0;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 320px;
+}
+
+.image-detail-viewer {
+  min-height: 0;
+  display: grid;
+  place-items: center;
+  overflow: auto;
+  padding: 18px;
+  background: #0f172a;
+}
+
+.image-detail-viewer img {
+  max-width: 100%;
+  max-height: 76vh;
+  object-fit: contain;
+  border-radius: 6px;
+}
+
+.image-detail-info {
+  min-height: 0;
+  overflow: auto;
+  padding: 18px;
+  border-left: 1px solid #e5e7eb;
+  background: #f8fafc;
+}
+
+.image-detail-info h3 {
+  margin: 0 0 10px;
+  color: #111827;
+  font-size: 15px;
+}
+
+.image-detail-info p {
+  margin: 8px 0;
+  color: #475569;
+  font-size: 13px;
+  line-height: 1.6;
+}
+
+.detail-detection-list {
+  margin-top: 16px;
+}
+
+.detail-detection-list ul {
+  display: grid;
+  gap: 8px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.detail-detection-list li {
+  display: grid;
+  gap: 3px;
+  padding: 10px;
+  border: 1px solid #dbe4f0;
+  border-radius: 8px;
+  background: #ffffff;
+}
+
+.detail-detection-list strong {
+  color: #111827;
+  font-size: 14px;
+}
+
+.detail-detection-list span,
+.detail-detection-list small {
+  color: #64748b;
+  font-size: 12px;
 }
 
 .risk-badge {
@@ -2032,6 +2492,7 @@ th {
 
   .result-layout,
   .compare-grid,
+  .log-main,
   .grid,
   .module-grid,
   .metric-grid,
@@ -2058,6 +2519,28 @@ th {
   .mode-panel {
     align-items: stretch;
     flex-direction: column;
+  }
+
+  .image-detail-modal {
+    padding: 12px;
+  }
+
+  .image-detail-dialog {
+    max-height: calc(100vh - 24px);
+  }
+
+  .image-detail-body {
+    grid-template-columns: 1fr;
+  }
+
+  .image-detail-viewer img {
+    max-height: 58vh;
+  }
+
+  .image-detail-info {
+    max-height: 260px;
+    border-top: 1px solid #e5e7eb;
+    border-left: 0;
   }
 
   .mode-selector {

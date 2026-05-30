@@ -117,6 +117,30 @@ def init_db():
             )
             """
         )
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS detection_logs (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id INTEGER NOT NULL,
+                username TEXT NOT NULL,
+                image_id TEXT NOT NULL,
+                original_filename TEXT NOT NULL,
+                detection_mode TEXT NOT NULL,
+                detection_mode_label TEXT NOT NULL,
+                models_used TEXT NOT NULL,
+                total_count INTEGER NOT NULL,
+                risk_level TEXT NOT NULL,
+                risk_score REAL NOT NULL,
+                scene_type TEXT NOT NULL,
+                class_count TEXT NOT NULL,
+                report TEXT NOT NULL,
+                result_image_url TEXT NOT NULL,
+                result_json_url TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                FOREIGN KEY (user_id) REFERENCES users (id)
+            )
+            """
+        )
 
         user_count = conn.execute("SELECT COUNT(*) AS count FROM users").fetchone()["count"]
         if user_count == 0:
@@ -173,6 +197,28 @@ def get_current_user(authorization: str = Header(default="")):
         raise HTTPException(status_code=401, detail="登录已过期，请重新登录")
 
     return {"id": row["id"], "username": row["username"]}
+
+
+def row_to_detection_log(row):
+    return {
+        "id": row["id"],
+        "user_id": row["user_id"],
+        "username": row["username"],
+        "image_id": row["image_id"],
+        "original_filename": row["original_filename"],
+        "detection_mode": row["detection_mode"],
+        "detection_mode_label": row["detection_mode_label"],
+        "models_used": json.loads(row["models_used"] or "[]"),
+        "total_count": row["total_count"],
+        "risk_level": row["risk_level"],
+        "risk_score": row["risk_score"],
+        "scene_type": row["scene_type"],
+        "class_count": json.loads(row["class_count"] or "{}"),
+        "report": row["report"],
+        "result_image_url": row["result_image_url"],
+        "result_json_url": row["result_json_url"],
+        "created_at": row["created_at"],
+    }
 
 
 init_db()
@@ -587,6 +633,25 @@ def logout(authorization: str = Header(default="")):
     return {"message": "已退出登录"}
 
 
+@app.get("/logs")
+@app.get("/detection-logs")
+@app.get("/detection_logs")
+def list_detection_logs(current_user=Depends(get_current_user)):
+    with get_db() as conn:
+        rows = conn.execute(
+            """
+            SELECT *
+            FROM detection_logs
+            WHERE user_id = ?
+            ORDER BY created_at DESC
+            LIMIT 100
+            """,
+            (current_user["id"],),
+        ).fetchall()
+
+    return {"logs": [row_to_detection_log(row) for row in rows]}
+
+
 @app.post("/detect")
 async def detect_image(
     file: UploadFile = File(...),
@@ -689,11 +754,44 @@ async def detect_image(
             },
         },
         "result_image_url": f"/results/{file_id}_result.jpg",
+        "result_json_url": f"/results/{file_id}_result.json",
         "report": report,
         "analysis": analysis
     }
 
     with open(result_json_path, "w", encoding="utf-8") as f:
         json.dump(result_data, f, ensure_ascii=False, indent=2)
+
+    with get_db() as conn:
+        cursor = conn.execute(
+            """
+            INSERT INTO detection_logs (
+                user_id, username, image_id, original_filename, detection_mode,
+                detection_mode_label, models_used, total_count, risk_level,
+                risk_score, scene_type, class_count, report, result_image_url,
+                result_json_url, created_at
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                current_user["id"],
+                current_user["username"],
+                file_id,
+                file.filename,
+                detection_mode,
+                DETECTION_MODES[detection_mode],
+                json.dumps(models_used, ensure_ascii=False),
+                len(detections),
+                analysis["risk_level"],
+                analysis["risk_score"],
+                analysis["scene_type"],
+                json.dumps(class_count, ensure_ascii=False),
+                report,
+                result_data["result_image_url"],
+                result_data["result_json_url"],
+                datetime.now(timezone.utc).isoformat(),
+            ),
+        )
+        result_data["log_id"] = cursor.lastrowid
 
     return result_data
