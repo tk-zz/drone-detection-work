@@ -67,31 +67,54 @@
               <button class="secondary-button" type="button" @click="switchMainPage('logs')">查看检测日志</button>
             </div>
           </div>
-          <div class="console-preview" aria-label="系统能力预览">
-            <div class="console-header">
-              <strong>Inspection Console</strong>
-              <span>{{ result ? 'UPDATED' : 'ONLINE' }}</span>
+          <div class="cvat-showcase" aria-label="动态检测工作台预览">
+            <div class="showcase-topbar">
+              <div>
+                <strong>UAV Review Studio</strong>
+                <span>{{ result ? 'Result synced' : 'Live preview' }}</span>
+              </div>
+              <small>{{ result ? consoleRiskLevel : 'Ready' }}</small>
             </div>
-            <div class="console-main">
-              <div>
-                <small>综合风险</small>
-                <strong :class="['console-risk-value', result ? riskClass(consoleRiskLevel) : 'risk-pending']">
-                  {{ consoleRiskLevel }}
-                </strong>
+
+            <div class="showcase-workspace">
+              <aside class="showcase-queue">
+                <span>Queue</span>
+                <button class="active" type="button">
+                  <strong>巡检图像 01</strong>
+                  <small>{{ result ? `${consoleTargetCount} targets` : 'pending' }}</small>
+                </button>
+                <button type="button">
+                  <strong>巡检图像 02</strong>
+                  <small>road scan</small>
+                </button>
+                <button type="button">
+                  <strong>巡检图像 03</strong>
+                  <small>water risk</small>
+                </button>
+              </aside>
+
+              <div class="showcase-canvas">
+                <img src="/src/assets/hero.png" alt="航拍检测工作台预览" />
+                <span class="scan-line"></span>
+                <span class="detect-box detect-box-car"><em>vehicle 0.91</em></span>
+                <span class="detect-box detect-box-road"><em>road 0.87</em></span>
+                <span class="detect-box detect-box-water"><em>water 0.76</em></span>
               </div>
-              <div>
-                <small>检测目标</small>
-                <strong>{{ consoleTargetCount }}</strong>
-              </div>
-              <div>
-                <small>异常模块</small>
-                <strong>{{ consoleAbnormalCount }}</strong>
-              </div>
-            </div>
-            <div class="console-list">
-              <p v-for="item in consoleModules" :key="item.title">
-                <span :class="riskClass(item.status)"></span>{{ item.title }}
-              </p>
+
+              <aside class="showcase-panel">
+                <span>Analysis</span>
+                <div>
+                  <small>Targets</small>
+                  <strong>{{ consoleTargetCount }}</strong>
+                </div>
+                <div>
+                  <small>Risk modules</small>
+                  <strong>{{ consoleAbnormalCount }}</strong>
+                </div>
+                <div class="showcase-meter">
+                  <i></i>
+                </div>
+              </aside>
             </div>
           </div>
         </div>
@@ -153,25 +176,48 @@
         <h2>图片上传</h2>
 
         <div
-          :class="['dropzone', { dragging: isDraggingFile, ready: selectedFile }]"
+          :class="['dropzone', { dragging: isDraggingFile, ready: selectedFiles.length }]"
           @dragenter.prevent="handleDragEnter"
           @dragover.prevent="handleDragOver"
           @dragleave.prevent="handleDragLeave"
           @drop.prevent="handleFileDrop"
         >
           <label class="dropzone-picker">
-            <input type="file" accept="image/*" @change="handleFileChange" />
+            <input type="file" accept="image/*" multiple @change="handleFileChange" />
             <span class="dropzone-icon">+</span>
-            <strong>{{ selectedFile ? selectedFile.name : '拖拽航拍图片到这里' }}</strong>
+            <strong>{{ selectedFileLabel }}</strong>
             <small>
-              {{ selectedFile ? '已选择图片，可重新拖入或点击更换' : '支持 jpg、png 等常见图片格式，也可以点击选择图片' }}
+              {{ selectedFiles.length ? '已选择图片，可重新拖入或点击更换整批文件' : '支持 jpg、png 等常见图片格式，也可以点击选择多张图片' }}
             </small>
           </label>
         </div>
 
+        <div v-if="selectedFiles.length" class="selected-file-list" aria-label="已选择图片列表">
+          <div class="batch-summary">
+            <strong>已选择 {{ selectedFiles.length }} 张图片</strong>
+            <span v-if="batchProgress.total">
+              已完成 {{ batchProgress.completed }}/{{ batchProgress.total }}
+              <template v-if="batchProgress.failed">，失败 {{ batchProgress.failed }}</template>
+            </span>
+          </div>
+          <ul>
+            <li
+              v-for="(file, index) in selectedFiles"
+              :key="`${file.name}-${file.size}-${file.lastModified}`"
+              :class="{ active: activePreviewIndex === index }"
+            >
+              <button type="button" @click="setActivePreview(index)">
+                <span>{{ file.name }}</span>
+                <small>{{ formatFileSize(file.size) }}</small>
+              </button>
+            </li>
+          </ul>
+          <p v-if="batchProgress.currentName" class="batch-current">正在检测：{{ batchProgress.currentName }}</p>
+        </div>
+
         <div class="upload-actions">
-          <button :disabled="!selectedFile || loading" @click="detectImage">
-            {{ loading ? '检测中...' : '开始智能识别' }}
+          <button :disabled="!selectedFiles.length || loading" @click="detectImage">
+            {{ uploadActionLabel }}
           </button>
         </div>
 
@@ -194,9 +240,60 @@
           </div>
         </div>
 
-        <div v-if="previewUrl" class="preview">
-          <h3>原始图片预览</h3>
-          <img :src="previewUrl" alt="原始图片" />
+        <div v-if="currentPreview" class="preview">
+          <div class="preview-header">
+            <div>
+              <h3>原始图片预览</h3>
+              <p>{{ currentPreview.file.name }}（{{ activePreviewIndex + 1 }}/{{ selectedImagePreviews.length }}）</p>
+            </div>
+            <div v-if="selectedImagePreviews.length > 1" class="pager-controls">
+              <button type="button" @click="showPreviousPreview">上一张</button>
+              <button type="button" @click="showNextPreview">下一张</button>
+            </div>
+          </div>
+          <div
+            class="preview-carousel"
+            @mousedown="startPreviewSwipe"
+            @mousemove="movePreviewSwipe"
+            @mouseup="endPreviewSwipe"
+            @mouseleave="cancelPreviewSwipe"
+            @touchstart.passive="startPreviewSwipe"
+            @touchmove.passive="movePreviewSwipe"
+            @touchend="endPreviewSwipe"
+            @touchcancel="cancelPreviewSwipe"
+          >
+            <button
+              v-if="selectedImagePreviews.length > 1"
+              class="preview-arrow preview-arrow-left"
+              type="button"
+              aria-label="查看上一张原始图片"
+              @click.stop="showPreviousPreview"
+            >
+              ‹
+            </button>
+            <img :src="currentPreview.url" alt="原始图片" draggable="false" />
+            <button
+              v-if="selectedImagePreviews.length > 1"
+              class="preview-arrow preview-arrow-right"
+              type="button"
+              aria-label="查看下一张原始图片"
+              @click.stop="showNextPreview"
+            >
+              ›
+            </button>
+          </div>
+          <div v-if="selectedImagePreviews.length > 1" class="preview-strip" aria-label="原始图片缩略图列表">
+            <button
+              v-for="(item, index) in selectedImagePreviews"
+              :key="`${item.file.name}-${item.file.size}-${item.file.lastModified}`"
+              :class="{ active: activePreviewIndex === index }"
+              type="button"
+              @click="setActivePreview(index)"
+            >
+              <img :src="item.url" :alt="item.file.name" />
+              <span>{{ index + 1 }}</span>
+            </button>
+          </div>
         </div>
 
         <p v-if="errorMessage" class="error">{{ errorMessage }}</p>
@@ -271,8 +368,68 @@
         <p v-if="exportError" class="error export-status">{{ exportError }}</p>
         <p v-else-if="exportMessage" class="success export-status">{{ exportMessage }}</p>
 
+        <section v-if="batchResults.length > 1" class="card batch-results-card">
+          <div class="section-heading">
+            <div>
+              <h2>批量检测结果</h2>
+              <p>共完成 {{ batchResults.length }} 张图片检测，当前查看第 {{ activeResultIndex + 1 }} 张。</p>
+            </div>
+            <div class="pager-controls">
+              <button type="button" @click="showPreviousResult">上一张</button>
+              <button type="button" @click="showNextResult">下一张</button>
+            </div>
+          </div>
+          <div class="batch-result-list" aria-label="批量检测结果列表">
+            <button
+              v-for="(item, index) in batchResults"
+              :key="`${item.result.image_id}-${index}`"
+              :class="{ active: activeResultIndex === index }"
+              type="button"
+              @click="selectBatchResult(index)"
+            >
+              <span>{{ index + 1 }}</span>
+              <strong>{{ item.result.original_filename }}</strong>
+              <small>{{ item.result.total_count }} 个目标 · {{ item.result.analysis?.risk_level || '待分析' }}</small>
+            </button>
+          </div>
+        </section>
+
         <section v-if="activeTab === 'overview'" class="card result-card">
           <h2>检测总览</h2>
+
+          <section v-if="batchOverviewItems.length > 1" class="batch-overview-panel">
+            <div class="section-heading">
+              <div>
+                <h3>批量图片检测概览</h3>
+                <p>每张图片的原图、检测结果和摘要如下，点击卡片可切换下方详情。</p>
+              </div>
+            </div>
+            <div class="batch-overview-grid">
+              <article
+                v-for="(item, index) in batchOverviewItems"
+                :key="`${item.result.image_id}-${index}`"
+                :class="{ active: activeResultIndex === index }"
+              >
+                <button type="button" @click="selectBatchResult(index)">
+                  <div class="batch-image-pair">
+                    <div>
+                      <span>原图</span>
+                      <img :src="item.preview?.url" :alt="`${item.result.original_filename} 原图`" />
+                    </div>
+                    <div>
+                      <span>检测图</span>
+                      <img :src="backendBaseUrl + item.result.result_image_url" :alt="`${item.result.original_filename} 检测结果`" />
+                    </div>
+                  </div>
+                  <div class="batch-card-copy">
+                    <strong>{{ item.result.original_filename }}</strong>
+                    <small>{{ item.result.total_count }} 个目标 · {{ item.result.analysis?.risk_level || '待分析' }}</small>
+                    <small>{{ item.result.analysis?.scene_type || '未识别到明确巡检场景' }}</small>
+                  </div>
+                </button>
+              </article>
+            </div>
+          </section>
 
           <section class="compare-panel">
             <h3>原始图片与检测结果对比</h3>
@@ -280,12 +437,12 @@
               <div>
                 <span>原始图片</span>
                 <button
-                  v-if="previewUrl"
+                  v-if="currentPreview"
                   class="image-detail-trigger"
                   type="button"
                   @click="openImageDetail('original')"
                 >
-                  <img :src="previewUrl" alt="原始图片" />
+                  <img :src="currentPreview.url" alt="原始图片" />
                   <span class="image-detail-badge">点击查看详情</span>
                 </button>
                 <p v-else class="empty compare-empty">当前会话暂无原始图片预览。</p>
@@ -553,9 +710,14 @@ import * as echarts from 'echarts'
 
 const backendBaseUrl = 'http://127.0.0.1:8000'
 
+const selectedFiles = ref([])
+const selectedImagePreviews = ref([])
+const activePreviewIndex = ref(0)
 const selectedFile = ref(null)
 const previewUrl = ref('')
 const result = ref(null)
+const batchResults = ref([])
+const activeResultIndex = ref(0)
 const loading = ref(false)
 const errorMessage = ref('')
 const detectionMode = ref('fusion')
@@ -575,6 +737,12 @@ const logsError = ref('')
 const exportLoading = ref(false)
 const exportError = ref('')
 const exportMessage = ref('')
+const batchProgress = ref({
+  total: 0,
+  completed: 0,
+  failed: 0,
+  currentName: ''
+})
 const loginForm = ref({
   username: 'admin',
   password: 'admin123'
@@ -584,11 +752,18 @@ const barChartRef = ref(null)
 const pieChartRef = ref(null)
 
 const analysis = computed(() => result.value?.analysis || null)
+const currentPreview = computed(() => selectedImagePreviews.value[activePreviewIndex.value] || null)
+const batchOverviewItems = computed(() => {
+  return batchResults.value.map(item => ({
+    ...item,
+    preview: selectedImagePreviews.value[item.fileIndex] || null
+  }))
+})
 const imageDetailTitle = computed(() => {
   return imageDetailType.value === 'original' ? '原始图片' : '检测结果图'
 })
 const imageDetailSrc = computed(() => {
-  if (imageDetailType.value === 'original') return previewUrl.value
+  if (imageDetailType.value === 'original') return currentPreview.value?.url || ''
   return result.value?.result_image_url ? `${backendBaseUrl}${result.value.result_image_url}` : ''
 })
 const detectionModes = [
@@ -609,6 +784,22 @@ const detectionModes = [
 ]
 const selectedDetectionMode = computed(() => {
   return detectionModes.find(mode => mode.value === detectionMode.value) || detectionModes[0]
+})
+const selectedFileLabel = computed(() => {
+  if (!selectedFiles.value.length) return '拖拽航拍图片到这里'
+  if (selectedFiles.value.length === 1) return selectedFiles.value[0].name
+  return `已选择 ${selectedFiles.value.length} 张航拍图片`
+})
+const uploadActionLabel = computed(() => {
+  if (!loading.value) {
+    return selectedFiles.value.length > 1 ? '开始批量智能识别' : '开始智能识别'
+  }
+
+  if (batchProgress.value.total > 1) {
+    return `检测中 ${batchProgress.value.completed}/${batchProgress.value.total}`
+  }
+
+  return '检测中...'
 })
 const pageTitles = {
   home: '系统首页',
@@ -676,9 +867,9 @@ const consoleModules = computed(() => {
 const quickStats = computed(() => [
   {
     label: '当前任务',
-    value: result.value ? '已完成' : selectedFile.value ? '待检测' : '未开始',
-    hint: selectedFile.value ? selectedFile.value.name : '上传一张航拍图像开始分析',
-    className: result.value ? 'stat-success' : selectedFile.value ? 'stat-warning' : ''
+    value: result.value ? '已完成' : selectedFiles.value.length ? '待检测' : '未开始',
+    hint: selectedFiles.value.length ? selectedFileLabel.value : '上传一张或多张航拍图像开始分析',
+    className: result.value ? 'stat-success' : selectedFiles.value.length ? 'stat-warning' : ''
   },
   {
     label: '检测目标',
@@ -751,6 +942,9 @@ const followUpActions = computed(() => {
 let barChart = null
 let pieChart = null
 let resizeFrame = 0
+let previewSwipeStartX = 0
+let previewSwipeCurrentX = 0
+let previewSwipeActive = false
 
 onMounted(() => {
   window.addEventListener('resize', handleChartResize)
@@ -763,9 +957,7 @@ onBeforeUnmount(() => {
   }
   barChart?.dispose()
   pieChart?.dispose()
-  if (previewUrl.value) {
-    URL.revokeObjectURL(previewUrl.value)
-  }
+  revokePreviewUrls()
 })
 
 function handleChartResize() {
@@ -779,28 +971,128 @@ function handleChartResize() {
 }
 
 function handleFileChange(event) {
-  const file = event.target.files[0]
-  setSelectedFile(file)
+  setSelectedFiles(event.target.files)
   event.target.value = ''
 }
 
-function setSelectedFile(file) {
-  if (!file) return
-  if (!file.type.startsWith('image/')) {
+function setSelectedFiles(fileList) {
+  const files = Array.from(fileList || [])
+  if (!files.length) return
+
+  const imageFiles = files.filter(file => file.type.startsWith('image/'))
+  if (!imageFiles.length) {
     errorMessage.value = '请上传 jpg、png 等图片文件'
     return
   }
 
-  selectedFile.value = file
+  selectedFiles.value = imageFiles
+  revokePreviewUrls()
+  selectedImagePreviews.value = imageFiles.map(file => ({
+    file,
+    url: URL.createObjectURL(file)
+  }))
+  activePreviewIndex.value = 0
+  selectedFile.value = imageFiles[0]
+  previewUrl.value = selectedImagePreviews.value[0]?.url || ''
+  batchResults.value = []
+  activeResultIndex.value = 0
   result.value = null
   errorMessage.value = ''
   activeTab.value = 'overview'
-
-  if (previewUrl.value) {
-    URL.revokeObjectURL(previewUrl.value)
+  batchProgress.value = {
+    total: 0,
+    completed: 0,
+    failed: 0,
+    currentName: ''
   }
+  if (imageFiles.length < files.length) {
+    errorMessage.value = `已忽略 ${files.length - imageFiles.length} 个非图片文件`
+  }
+}
 
-  previewUrl.value = URL.createObjectURL(file)
+function revokePreviewUrls() {
+  selectedImagePreviews.value.forEach(item => URL.revokeObjectURL(item.url))
+  selectedImagePreviews.value = []
+  previewUrl.value = ''
+}
+
+function setActivePreview(index) {
+  if (!selectedImagePreviews.value.length) return
+  const nextIndex = (index + selectedImagePreviews.value.length) % selectedImagePreviews.value.length
+  const nextPreview = selectedImagePreviews.value[nextIndex]
+  activePreviewIndex.value = nextIndex
+  selectedFile.value = nextPreview.file
+  previewUrl.value = nextPreview.url
+}
+
+function showPreviousPreview() {
+  setActivePreview(activePreviewIndex.value - 1)
+}
+
+function showNextPreview() {
+  setActivePreview(activePreviewIndex.value + 1)
+}
+
+async function selectBatchResult(index) {
+  if (!batchResults.value.length) return
+  const nextIndex = (index + batchResults.value.length) % batchResults.value.length
+  const item = batchResults.value[nextIndex]
+  activeResultIndex.value = nextIndex
+  result.value = item.result
+  setActivePreview(item.fileIndex)
+
+  if (activeTab.value === 'charts') {
+    await nextTick()
+    renderCharts()
+  }
+}
+
+function showPreviousResult() {
+  selectBatchResult(activeResultIndex.value - 1)
+}
+
+function showNextResult() {
+  selectBatchResult(activeResultIndex.value + 1)
+}
+
+function getSwipeClientX(event) {
+  return event.touches?.[0]?.clientX ?? event.changedTouches?.[0]?.clientX ?? event.clientX ?? 0
+}
+
+function startPreviewSwipe(event) {
+  if (selectedImagePreviews.value.length < 2) return
+  previewSwipeActive = true
+  previewSwipeStartX = getSwipeClientX(event)
+  previewSwipeCurrentX = previewSwipeStartX
+}
+
+function movePreviewSwipe(event) {
+  if (!previewSwipeActive) return
+  previewSwipeCurrentX = getSwipeClientX(event)
+}
+
+function endPreviewSwipe(event) {
+  if (!previewSwipeActive) return
+  previewSwipeCurrentX = getSwipeClientX(event)
+  const deltaX = previewSwipeCurrentX - previewSwipeStartX
+  previewSwipeActive = false
+
+  if (Math.abs(deltaX) < 48) return
+  if (deltaX > 0) {
+    showPreviousPreview()
+  } else {
+    showNextPreview()
+  }
+}
+
+function cancelPreviewSwipe() {
+  previewSwipeActive = false
+}
+
+function formatFileSize(size) {
+  if (size < 1024) return `${size} B`
+  if (size < 1024 * 1024) return `${(size / 1024).toFixed(1)} KB`
+  return `${(size / 1024 / 1024).toFixed(1)} MB`
 }
 
 function handleDragEnter() {
@@ -822,36 +1114,77 @@ function handleDragLeave() {
 function handleFileDrop(event) {
   dragDepth.value = 0
   isDraggingFile.value = false
-  const file = event.dataTransfer?.files?.[0]
-  setSelectedFile(file)
+  setSelectedFiles(event.dataTransfer?.files)
 }
 
 async function detectImage() {
-  if (!selectedFile.value) {
-    errorMessage.value = '请先选择一张图片'
+  if (!selectedFiles.value.length) {
+    errorMessage.value = '请先选择一张或多张图片'
     return
   }
 
   loading.value = true
   errorMessage.value = ''
   result.value = null
+  batchResults.value = []
+  activeResultIndex.value = 0
+  batchProgress.value = {
+    total: selectedFiles.value.length,
+    completed: 0,
+    failed: 0,
+    currentName: ''
+  }
 
   try {
-    const formData = new FormData()
-    formData.append('file', selectedFile.value)
-    formData.append('detection_mode', detectionMode.value)
+    let latestResult = null
 
-    const response = await axios.post(`${backendBaseUrl}/detect`, formData, {
-      headers: {
-        'Content-Type': 'multipart/form-data',
-        Authorization: `Bearer ${authToken.value}`
+    for (const [fileIndex, file] of selectedFiles.value.entries()) {
+      batchProgress.value.currentName = file.name
+      setActivePreview(fileIndex)
+
+      const formData = new FormData()
+      formData.append('file', file)
+      formData.append('detection_mode', detectionMode.value)
+
+      try {
+        const response = await axios.post(`${backendBaseUrl}/detect`, formData, {
+          headers: {
+            'Content-Type': 'multipart/form-data',
+            Authorization: `Bearer ${authToken.value}`
+          }
+        })
+
+        latestResult = response.data
+        result.value = response.data
+        batchResults.value.push({
+          fileIndex,
+          result: response.data
+        })
+        activeResultIndex.value = batchResults.value.length - 1
+        prependDetectionLogFromResult(response.data)
+        batchProgress.value.completed += 1
+      } catch (error) {
+        console.error(error)
+        if (error.response?.status === 401) {
+          clearAuth()
+          errorMessage.value = '登录已过期，请重新登录'
+          return
+        }
+        batchProgress.value.failed += 1
       }
-    })
+    }
 
-    result.value = response.data
-    prependDetectionLogFromResult(response.data)
-    await switchMainPage('results')
-    activeTab.value = 'overview'
+    batchProgress.value.currentName = ''
+
+    if (latestResult) {
+      await selectBatchResult(batchResults.value.length - 1)
+      await switchMainPage('results')
+      activeTab.value = 'overview'
+    }
+
+    if (batchProgress.value.failed) {
+      errorMessage.value = `批量检测完成，成功 ${batchProgress.value.completed} 张，失败 ${batchProgress.value.failed} 张`
+    }
   } catch (error) {
     console.error(error)
     if (error.response?.status === 401) {
@@ -1531,19 +1864,19 @@ function formatDateTime(value) {
 }
 
 .welcome-band {
-  min-height: 430px;
+  min-height: 500px;
   display: grid;
-  grid-template-columns: minmax(0, 1.2fr) 420px;
+  grid-template-columns: minmax(360px, 0.88fr) minmax(560px, 1.12fr);
   align-items: center;
-  gap: 32px;
-  padding: 34px;
+  gap: 36px;
+  padding: 42px;
   overflow: hidden;
   border-radius: 8px;
   background:
-    linear-gradient(90deg, rgba(15, 23, 42, 0.84), rgba(19, 78, 74, 0.28)),
+    linear-gradient(90deg, rgba(8, 15, 29, 0.9), rgba(15, 23, 42, 0.62)),
     url('/src/assets/hero.png') center / cover no-repeat;
   color: #ffffff;
-  box-shadow: 0 10px 26px rgba(15, 23, 42, 0.16);
+  box-shadow: 0 12px 28px rgba(15, 23, 42, 0.18);
 }
 
 .welcome-copy {
@@ -1575,6 +1908,7 @@ function formatDateTime(value) {
 }
 
 .welcome-actions {
+  width: 100%;
   display: flex;
   flex-wrap: wrap;
   justify-content: flex-start;
@@ -1587,17 +1921,289 @@ function formatDateTime(value) {
   color: #ffffff;
 }
 
-.console-preview {
+.cvat-showcase {
   align-self: stretch;
-  display: flex;
-  flex-direction: column;
-  justify-content: space-between;
-  min-height: 310px;
-  padding: 20px;
-  border: 1px solid rgba(255, 255, 255, 0.2);
+  min-height: 390px;
+  display: grid;
+  grid-template-rows: auto 1fr;
+  overflow: hidden;
+  border: 1px solid rgba(226, 232, 240, 0.18);
   border-radius: 8px;
-  background: rgba(15, 23, 42, 0.72);
-  backdrop-filter: blur(10px);
+  background: #0b1220;
+  box-shadow: 0 24px 54px rgba(2, 6, 23, 0.34);
+}
+
+.showcase-topbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 14px;
+  padding: 14px 16px;
+  border-bottom: 1px solid rgba(148, 163, 184, 0.22);
+  background: #111827;
+}
+
+.showcase-topbar div {
+  display: grid;
+  gap: 3px;
+}
+
+.showcase-topbar strong {
+  color: #f8fafc;
+  font-size: 15px;
+}
+
+.showcase-topbar span,
+.showcase-topbar small {
+  color: #93c5fd;
+  font-size: 12px;
+  font-weight: 800;
+}
+
+.showcase-topbar small {
+  padding: 5px 8px;
+  border-radius: 999px;
+  background: rgba(37, 99, 235, 0.18);
+}
+
+.showcase-workspace {
+  min-height: 0;
+  display: grid;
+  grid-template-columns: 138px minmax(0, 1fr) 132px;
+  background: #0f172a;
+}
+
+.showcase-queue,
+.showcase-panel {
+  min-width: 0;
+  display: grid;
+  align-content: start;
+  gap: 10px;
+  padding: 14px;
+  border-right: 1px solid rgba(148, 163, 184, 0.16);
+  background: #111827;
+}
+
+.showcase-panel {
+  border-right: 0;
+  border-left: 1px solid rgba(148, 163, 184, 0.16);
+}
+
+.showcase-queue > span,
+.showcase-panel > span {
+  margin: 0;
+  color: #94a3b8;
+  font-size: 11px;
+  font-weight: 900;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+}
+
+.showcase-queue button {
+  min-width: 0;
+  display: grid;
+  gap: 4px;
+  padding: 10px;
+  border: 1px solid rgba(148, 163, 184, 0.16);
+  background: rgba(15, 23, 42, 0.9);
+  color: #e2e8f0;
+  text-align: left;
+}
+
+.showcase-queue button.active {
+  border-color: rgba(96, 165, 250, 0.82);
+  background: rgba(37, 99, 235, 0.18);
+}
+
+.showcase-queue strong,
+.showcase-queue small {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.showcase-queue strong {
+  font-size: 12px;
+}
+
+.showcase-queue small {
+  color: #94a3b8;
+  font-size: 11px;
+}
+
+.showcase-canvas {
+  position: relative;
+  min-height: 320px;
+  overflow: hidden;
+  background: #020617;
+}
+
+.showcase-canvas img {
+  width: 100%;
+  height: 100%;
+  min-height: 320px;
+  display: block;
+  object-fit: cover;
+  opacity: 0.72;
+  filter: saturate(0.9) contrast(1.06);
+}
+
+.showcase-canvas::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  background:
+    linear-gradient(rgba(148, 163, 184, 0.08) 1px, transparent 1px),
+    linear-gradient(90deg, rgba(148, 163, 184, 0.06) 1px, transparent 1px);
+  background-size: 34px 34px;
+  pointer-events: none;
+}
+
+.scan-line {
+  position: absolute;
+  top: -20%;
+  left: 0;
+  z-index: 2;
+  width: 100%;
+  height: 80px;
+  background: linear-gradient(180deg, transparent, rgba(56, 189, 248, 0.34), transparent);
+  animation: scan-canvas 5.2s ease-in-out infinite;
+}
+
+.detect-box {
+  position: absolute;
+  z-index: 3;
+  border: 2px solid #38bdf8;
+  border-radius: 4px;
+  box-shadow: 0 0 0 1px rgba(15, 23, 42, 0.65), 0 0 24px rgba(56, 189, 248, 0.18);
+  animation: detect-pulse 2.8s ease-in-out infinite;
+}
+
+.detect-box em {
+  position: absolute;
+  left: -2px;
+  top: -26px;
+  padding: 4px 6px;
+  border-radius: 4px;
+  background: #0ea5e9;
+  color: #ffffff;
+  font-size: 11px;
+  font-style: normal;
+  font-weight: 800;
+  white-space: nowrap;
+}
+
+.detect-box-car {
+  left: 18%;
+  top: 57%;
+  width: 22%;
+  height: 18%;
+}
+
+.detect-box-road {
+  left: 46%;
+  top: 42%;
+  width: 30%;
+  height: 16%;
+  border-color: #22c55e;
+  animation-delay: 0.7s;
+}
+
+.detect-box-road em {
+  background: #16a34a;
+}
+
+.detect-box-water {
+  left: 58%;
+  top: 70%;
+  width: 24%;
+  height: 15%;
+  border-color: #f59e0b;
+  animation-delay: 1.2s;
+}
+
+.detect-box-water em {
+  background: #d97706;
+}
+
+.showcase-panel div {
+  display: grid;
+  gap: 4px;
+  padding: 10px;
+  border: 1px solid rgba(148, 163, 184, 0.16);
+  border-radius: 6px;
+  background: rgba(15, 23, 42, 0.92);
+}
+
+.showcase-panel small {
+  color: #94a3b8;
+  font-size: 11px;
+  font-weight: 800;
+}
+
+.showcase-panel strong {
+  color: #f8fafc;
+  font-size: 24px;
+}
+
+.showcase-meter {
+  height: 90px;
+  align-items: end;
+}
+
+.showcase-meter i {
+  display: block;
+  width: 100%;
+  height: 58%;
+  border-radius: 6px;
+  background: linear-gradient(180deg, #38bdf8, #2563eb);
+  animation: meter-rise 4s ease-in-out infinite;
+}
+
+@keyframes scan-canvas {
+  0%,
+  18% {
+    transform: translateY(0);
+    opacity: 0;
+  }
+
+  28% {
+    opacity: 1;
+  }
+
+  72% {
+    opacity: 1;
+  }
+
+  100% {
+    transform: translateY(520%);
+    opacity: 0;
+  }
+}
+
+@keyframes detect-pulse {
+  0%,
+  100% {
+    opacity: 0.72;
+    transform: scale(0.995);
+  }
+
+  45% {
+    opacity: 1;
+    transform: scale(1.015);
+  }
+}
+
+@keyframes meter-rise {
+  0%,
+  100% {
+    height: 42%;
+  }
+
+  50% {
+    height: 74%;
+  }
 }
 
 .status-grid {
@@ -2047,6 +2653,88 @@ function formatDateTime(value) {
   text-align: center;
 }
 
+.selected-file-list {
+  margin-top: 16px;
+  padding: 14px 16px;
+  border: 1px solid #dbe4f0;
+  border-radius: 8px;
+  background: #f8fafc;
+  text-align: left;
+}
+
+.batch-summary {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  color: #111827;
+}
+
+.batch-summary strong {
+  font-size: 15px;
+}
+
+.batch-summary span,
+.batch-current {
+  color: #2563eb;
+  font-size: 13px;
+  font-weight: 800;
+}
+
+.selected-file-list ul {
+  max-height: 150px;
+  overflow: auto;
+  display: grid;
+  gap: 8px;
+  margin: 12px 0 0;
+  padding: 0;
+  list-style: none;
+}
+
+.selected-file-list li {
+  min-width: 0;
+}
+
+.selected-file-list li button {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  width: 100%;
+  min-width: 0;
+  padding: 8px 10px;
+  border: 1px solid transparent;
+  border-radius: 6px;
+  background: #ffffff;
+  color: inherit;
+  text-align: left;
+}
+
+.selected-file-list li.active button {
+  border-color: #2563eb;
+  background: #eff6ff;
+}
+
+.selected-file-list li span {
+  min-width: 0;
+  overflow: hidden;
+  color: #334155;
+  font-size: 13px;
+  font-weight: 700;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.selected-file-list li small {
+  flex: 0 0 auto;
+  color: #64748b;
+  font-size: 12px;
+}
+
+.batch-current {
+  margin: 12px 0 0;
+}
+
 .mode-panel {
   display: flex;
   align-items: center;
@@ -2149,11 +2837,281 @@ button:disabled {
   margin-top: 20px;
 }
 
-.preview img,
+.preview-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 12px;
+  text-align: left;
+}
+
+.preview-header h3 {
+  margin: 0;
+}
+
+.preview-header p {
+  margin: 4px 0 0;
+  color: #64748b;
+  font-size: 13px;
+}
+
+.pager-controls {
+  flex: 0 0 auto;
+  display: inline-flex;
+  gap: 8px;
+}
+
+.pager-controls button {
+  padding: 8px 12px;
+  border: 1px solid #cbd5e1;
+  background: #ffffff;
+  color: #1e3a8a;
+  font-size: 13px;
+  font-weight: 800;
+}
+
+.pager-controls button:hover {
+  background: #eff6ff;
+}
+
+.preview-carousel img,
 .image-panel img {
   max-width: 100%;
   border-radius: 8px;
   border: 1px solid #e5e7eb;
+}
+
+.preview-carousel {
+  position: relative;
+  overflow: hidden;
+  border-radius: 8px;
+  background: #f8fafc;
+  touch-action: pan-y;
+  user-select: none;
+}
+
+.preview-carousel img {
+  display: block;
+  width: 100%;
+  max-height: 520px;
+  object-fit: contain;
+}
+
+.preview-arrow {
+  position: absolute;
+  top: 50%;
+  z-index: 2;
+  display: grid;
+  place-items: center;
+  width: 42px;
+  height: 54px;
+  padding: 0;
+  border: 1px solid rgba(255, 255, 255, 0.58);
+  border-radius: 8px;
+  background: rgba(15, 23, 42, 0.58);
+  color: #ffffff;
+  font-size: 34px;
+  line-height: 1;
+  transform: translateY(-50%);
+}
+
+.preview-arrow:hover {
+  background: rgba(15, 23, 42, 0.78);
+  transform: translateY(-50%);
+}
+
+.preview-arrow-left {
+  left: 12px;
+}
+
+.preview-arrow-right {
+  right: 12px;
+}
+
+.preview-strip {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(110px, 1fr));
+  gap: 10px;
+  margin-top: 12px;
+}
+
+.preview-strip button {
+  position: relative;
+  min-width: 0;
+  overflow: hidden;
+  padding: 0;
+  border: 2px solid transparent;
+  background: #ffffff;
+}
+
+.preview-strip button.active {
+  border-color: #2563eb;
+  box-shadow: 0 8px 18px rgba(37, 99, 235, 0.14);
+}
+
+.preview-strip img {
+  display: block;
+  width: 100%;
+  aspect-ratio: 4 / 3;
+  object-fit: cover;
+  border: none;
+  border-radius: 6px;
+}
+
+.preview-strip span {
+  position: absolute;
+  left: 6px;
+  top: 6px;
+  display: grid;
+  place-items: center;
+  min-width: 24px;
+  height: 24px;
+  border-radius: 999px;
+  background: rgba(15, 23, 42, 0.78);
+  color: #ffffff;
+  font-size: 12px;
+  font-weight: 900;
+}
+
+.batch-results-card {
+  margin-bottom: 18px;
+}
+
+.batch-result-list {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+  gap: 10px;
+}
+
+.batch-result-list button {
+  min-width: 0;
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  gap: 4px 10px;
+  padding: 12px;
+  border: 1px solid #dbe4f0;
+  background: #ffffff;
+  color: #334155;
+  text-align: left;
+}
+
+.batch-result-list button.active {
+  border-color: #2563eb;
+  background: #eff6ff;
+  box-shadow: 0 8px 18px rgba(37, 99, 235, 0.12);
+}
+
+.batch-result-list span {
+  grid-row: span 2;
+  display: grid;
+  place-items: center;
+  width: 28px;
+  height: 28px;
+  border-radius: 999px;
+  background: #dbeafe;
+  color: #1d4ed8;
+  font-size: 13px;
+  font-weight: 900;
+}
+
+.batch-result-list strong,
+.batch-result-list small {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.batch-result-list strong {
+  color: #111827;
+  font-size: 14px;
+}
+
+.batch-result-list small {
+  color: #64748b;
+  font-size: 12px;
+}
+
+.batch-overview-panel {
+  margin: 18px 0 24px;
+  text-align: left;
+}
+
+.batch-overview-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+  gap: 14px;
+}
+
+.batch-overview-grid article {
+  min-width: 0;
+}
+
+.batch-overview-grid article > button {
+  width: 100%;
+  min-width: 0;
+  padding: 12px;
+  border: 1px solid #dbe4f0;
+  background: #ffffff;
+  color: #334155;
+  text-align: left;
+}
+
+.batch-overview-grid article.active > button {
+  border-color: #2563eb;
+  background: #eff6ff;
+  box-shadow: 0 8px 20px rgba(37, 99, 235, 0.12);
+}
+
+.batch-image-pair {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 8px;
+}
+
+.batch-image-pair div {
+  display: grid;
+  gap: 6px;
+}
+
+.batch-image-pair span {
+  color: #64748b;
+  font-size: 12px;
+  font-weight: 800;
+}
+
+.batch-image-pair img {
+  width: 100%;
+  aspect-ratio: 4 / 3;
+  object-fit: cover;
+  border: 1px solid #e5e7eb;
+  border-radius: 6px;
+  background: #f8fafc;
+}
+
+.batch-card-copy {
+  display: grid;
+  gap: 4px;
+  margin-top: 10px;
+}
+
+.batch-card-copy strong,
+.batch-card-copy small {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.batch-card-copy strong {
+  color: #111827;
+  font-size: 14px;
+}
+
+.batch-card-copy small {
+  color: #64748b;
+  font-size: 12px;
 }
 
 .compare-panel {
@@ -2895,8 +3853,25 @@ th {
     white-space: normal;
   }
 
-  .console-preview {
-    min-height: 240px;
+  .cvat-showcase {
+    min-height: 360px;
+  }
+
+  .showcase-workspace {
+    grid-template-columns: 104px minmax(0, 1fr);
+  }
+
+  .showcase-panel {
+    display: none;
+  }
+
+  .showcase-queue {
+    padding: 10px;
+  }
+
+  .showcase-canvas,
+  .showcase-canvas img {
+    min-height: 280px;
   }
 
   .welcome-band h2 {
