@@ -34,6 +34,19 @@
       </div>
       <p class="system-name">无人机航拍场景异常检测与可视分析系统</p>
       <h1>{{ currentPageTitle }}</h1>
+      <nav class="main-nav" aria-label="主导航">
+        <button
+          v-for="item in mainNavItems"
+          :key="item.key"
+          :class="{ active: activePage === item.key }"
+          :disabled="item.disabled"
+          type="button"
+          @click="switchMainPage(item.key)"
+        >
+          <span>{{ item.icon }}</span>
+          {{ item.label }}
+        </button>
+      </nav>
       <div v-if="activePage !== 'home'" class="page-actions">
         <button type="button" @click="goBack">返回</button>
         <button type="button" @click="goHome">首页</button>
@@ -81,6 +94,14 @@
               </p>
             </div>
           </div>
+        </div>
+
+        <div class="status-grid" aria-label="工作台概览">
+          <article v-for="item in quickStats" :key="item.label">
+            <span>{{ item.label }}</span>
+            <strong :class="item.className">{{ item.value }}</strong>
+            <small>{{ item.hint }}</small>
+          </article>
         </div>
 
         <section class="workflow-card">
@@ -238,10 +259,17 @@
             </button>
           </nav>
 
-          <button class="export-button" type="button" @click="exportInspectionDocument">
-            导出巡检文档
+          <button
+            class="export-button"
+            type="button"
+            :disabled="exportLoading || !result"
+            @click="exportInspectionDocument"
+          >
+            {{ exportLoading ? '正在导出...' : '导出巡检文档' }}
           </button>
         </div>
+        <p v-if="exportError" class="error export-status">{{ exportError }}</p>
+        <p v-else-if="exportMessage" class="success export-status">{{ exportMessage }}</p>
 
         <section v-if="activeTab === 'overview'" class="card result-card">
           <h2>检测总览</h2>
@@ -519,7 +547,7 @@
 </template>
 
 <script setup>
-import { ref, nextTick, computed } from 'vue'
+import { ref, nextTick, computed, onBeforeUnmount, onMounted } from 'vue'
 import axios from 'axios'
 import * as echarts from 'echarts'
 
@@ -544,6 +572,9 @@ const imageDetailType = ref('result')
 const detectionLogs = ref([])
 const logsLoading = ref(false)
 const logsError = ref('')
+const exportLoading = ref(false)
+const exportError = ref('')
+const exportMessage = ref('')
 const loginForm = ref({
   username: 'admin',
   password: 'admin123'
@@ -586,6 +617,12 @@ const pageTitles = {
   logs: '检测日志'
 }
 const currentPageTitle = computed(() => pageTitles[activePage.value] || '系统首页')
+const mainNavItems = computed(() => [
+  { key: 'home', label: '首页', icon: '⌂', disabled: false },
+  { key: 'upload', label: '上传检测', icon: '+', disabled: false },
+  { key: 'results', label: '结果分析', icon: '▣', disabled: !result.value },
+  { key: 'logs', label: '检测日志', icon: '≡', disabled: false }
+])
 const tabs = [
   { key: 'overview', label: '检测总览' },
   { key: 'analysis', label: '异常分析' },
@@ -635,6 +672,33 @@ const consoleModules = computed(() => {
     status: module.status
   }))
 })
+
+const quickStats = computed(() => [
+  {
+    label: '当前任务',
+    value: result.value ? '已完成' : selectedFile.value ? '待检测' : '未开始',
+    hint: selectedFile.value ? selectedFile.value.name : '上传一张航拍图像开始分析',
+    className: result.value ? 'stat-success' : selectedFile.value ? 'stat-warning' : ''
+  },
+  {
+    label: '检测目标',
+    value: consoleTargetCount.value,
+    hint: result.value ? '本次识别目标总数' : '完成检测后自动统计',
+    className: result.value ? 'stat-info' : ''
+  },
+  {
+    label: '综合风险',
+    value: consoleRiskLevel.value,
+    hint: analysis.value ? `风险评分 ${analysis.value.risk_score}` : '等待异常分析结果',
+    className: riskClass(consoleRiskLevel.value)
+  },
+  {
+    label: '日志记录',
+    value: detectionLogs.value.length || '--',
+    hint: detectionLogs.value.length ? '已缓存检测记录' : '进入日志页后同步加载',
+    className: detectionLogs.value.length ? 'stat-info' : ''
+  }
+])
 
 const overallRecommendation = computed(() => {
   if (!analysis.value) return ''
@@ -686,6 +750,33 @@ const followUpActions = computed(() => {
 
 let barChart = null
 let pieChart = null
+let resizeFrame = 0
+
+onMounted(() => {
+  window.addEventListener('resize', handleChartResize)
+})
+
+onBeforeUnmount(() => {
+  window.removeEventListener('resize', handleChartResize)
+  if (resizeFrame) {
+    cancelAnimationFrame(resizeFrame)
+  }
+  barChart?.dispose()
+  pieChart?.dispose()
+  if (previewUrl.value) {
+    URL.revokeObjectURL(previewUrl.value)
+  }
+})
+
+function handleChartResize() {
+  if (resizeFrame) {
+    cancelAnimationFrame(resizeFrame)
+  }
+  resizeFrame = requestAnimationFrame(() => {
+    barChart?.resize()
+    pieChart?.resize()
+  })
+}
 
 function handleFileChange(event) {
   const file = event.target.files[0]
@@ -911,6 +1002,9 @@ function escapeHtml(value) {
 
 async function imageUrlToDataUrl(url) {
   const response = await fetch(url)
+  if (!response.ok) {
+    throw new Error(`图片读取失败：${response.status}`)
+  }
   const blob = await response.blob()
 
   return new Promise((resolve, reject) => {
@@ -921,101 +1015,185 @@ async function imageUrlToDataUrl(url) {
   })
 }
 
-async function exportInspectionDocument() {
-  if (!result.value || !analysis.value) return
+async function fileToDataUrl(file) {
+  if (!file) return ''
 
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader()
+    reader.onloadend = () => resolve(reader.result)
+    reader.onerror = reject
+    reader.readAsDataURL(file)
+  })
+}
+
+function safeFileName(value) {
+  return String(value || 'inspection-result')
+    .replace(/\.[^.]+$/, '')
+    .replace(/[\\/:*?"<>|]/g, '-')
+    .replace(/\s+/g, '-')
+    .slice(0, 80)
+}
+
+function downloadBlob(blob, fileName) {
+  const link = document.createElement('a')
+  const objectUrl = URL.createObjectURL(blob)
+  link.href = objectUrl
+  link.download = fileName
+  link.style.display = 'none'
+  document.body.appendChild(link)
+  link.click()
+  document.body.removeChild(link)
+
+  window.setTimeout(() => {
+    URL.revokeObjectURL(objectUrl)
+  }, 30000)
+}
+
+async function exportInspectionDocument() {
+  if (!result.value) {
+    exportError.value = '暂无检测结果，无法导出巡检文档'
+    return
+  }
+
+  exportLoading.value = true
+  exportError.value = ''
+  exportMessage.value = ''
+
+  let originalImageDataUrl = ''
   let resultImageDataUrl = ''
   try {
-    resultImageDataUrl = await imageUrlToDataUrl(backendBaseUrl + result.value.result_image_url)
+    if (selectedFile.value) {
+      originalImageDataUrl = await fileToDataUrl(selectedFile.value)
+    }
+    if (result.value.result_image_url) {
+      resultImageDataUrl = await imageUrlToDataUrl(`${backendBaseUrl}${result.value.result_image_url}`)
+    }
   } catch (error) {
     console.error(error)
   }
 
-  const generatedAt = new Date().toLocaleString('zh-CN', { hour12: false })
-  const classRows = Object.entries(result.value.class_count || {})
-    .map(([name, count]) => `<tr><td>${escapeHtml(name)}</td><td>${count}</td></tr>`)
-    .join('')
-  const moduleRows = (analysis.value.modules || [])
-    .map(module => `
-      <tr>
-        <td>${escapeHtml(module.title)}</td>
-        <td>${escapeHtml(module.status)}</td>
-        <td>${module.score}</td>
-        <td>${escapeHtml(module.reason)}</td>
-        <td>${escapeHtml(module.suggestion)}</td>
-      </tr>
-    `)
-    .join('')
-  const actionItems = followUpActions.value
-    .map(action => `<li>${escapeHtml(action)}</li>`)
-    .join('')
+  try {
+    const currentAnalysis = analysis.value
+    const generatedAt = new Date().toLocaleString('zh-CN', { hour12: false })
+    const classRows = Object.entries(result.value.class_count || {})
+      .map(([name, count]) => `<tr><td>${escapeHtml(name)}</td><td>${count}</td></tr>`)
+      .join('')
+    const detectionRows = (result.value.detections || [])
+      .map((item, index) => `
+        <tr>
+          <td>${index + 1}</td>
+          <td>${escapeHtml(item.class_name)}</td>
+          <td>${escapeHtml(modelRoleLabel(item.model_role))}</td>
+          <td>${escapeHtml(formatConfidence(item.confidence))}</td>
+          <td>${escapeHtml(item.area)}</td>
+        </tr>
+      `)
+      .join('')
+    const moduleRows = (currentAnalysis?.modules || [])
+      .map(module => `
+        <tr>
+          <td>${escapeHtml(module.title)}</td>
+          <td>${escapeHtml(module.status)}</td>
+          <td>${escapeHtml(module.score)}</td>
+          <td>${escapeHtml(module.reason)}</td>
+          <td>${escapeHtml(module.suggestion)}</td>
+        </tr>
+      `)
+      .join('')
+    const actionItems = followUpActions.value
+      .map(action => `<li>${escapeHtml(action)}</li>`)
+      .join('')
+    const sceneTags = (currentAnalysis?.scene_tags || [])
+      .map(tag => `<span class="tag">${escapeHtml(tag)}</span>`)
+      .join('')
 
-  const html = `
-    <!doctype html>
-    <html>
-      <head>
-        <meta charset="utf-8">
-        <title>无人机航拍图像巡检分析报告</title>
-        <style>
-          body { font-family: "Microsoft YaHei", Arial, sans-serif; color: #111827; line-height: 1.7; }
-          h1 { margin: 0 0 10px; font-size: 24px; }
-          h2 { margin: 24px 0 10px; font-size: 18px; border-bottom: 1px solid #d1d5db; padding-bottom: 6px; }
-          h3 { margin: 16px 0 8px; font-size: 15px; }
-          .meta { color: #4b5563; }
-          .risk { display: inline-block; padding: 2px 8px; border-radius: 999px; background: #eff6ff; color: #1d4ed8; font-weight: 700; }
-          table { width: 100%; border-collapse: collapse; margin: 8px 0 16px; font-size: 13px; }
-          th, td { border: 1px solid #d1d5db; padding: 8px; vertical-align: top; text-align: left; }
-          th { background: #f3f4f6; }
-          img { max-width: 100%; margin-top: 8px; border: 1px solid #d1d5db; }
-          .summary { padding: 12px; background: #f8fafc; border-left: 4px solid #2563eb; }
-        </style>
-      </head>
-      <body>
-        <h1>无人机航拍图像巡检分析报告</h1>
-        <p class="meta">生成时间：${escapeHtml(generatedAt)}</p>
-        <p class="meta">图片名称：${escapeHtml(result.value.original_filename)}</p>
+    const html = `
+      <!doctype html>
+      <html>
+        <head>
+          <meta charset="utf-8">
+          <title>无人机航拍图像巡检分析报告</title>
+          <style>
+            body { font-family: "Microsoft YaHei", Arial, sans-serif; color: #111827; line-height: 1.7; }
+            h1 { margin: 0 0 10px; font-size: 26px; }
+            h2 { margin: 24px 0 10px; font-size: 18px; border-bottom: 1px solid #d1d5db; padding-bottom: 6px; }
+            h3 { margin: 16px 0 8px; font-size: 15px; }
+            .meta { color: #4b5563; margin: 4px 0; }
+            .summary { padding: 12px; background: #f8fafc; border-left: 4px solid #2563eb; }
+            .risk { display: inline-block; padding: 2px 8px; border-radius: 12px; background: #eff6ff; color: #1d4ed8; font-weight: 700; }
+            .tag { display: inline-block; margin: 0 6px 6px 0; padding: 3px 8px; border: 1px solid #c7d2fe; border-radius: 12px; color: #3730a3; background: #eef2ff; font-size: 12px; }
+            table { width: 100%; border-collapse: collapse; margin: 8px 0 16px; font-size: 13px; }
+            th, td { border: 1px solid #d1d5db; padding: 8px; vertical-align: top; text-align: left; }
+            th { background: #f3f4f6; }
+            img { max-width: 100%; margin: 8px 0 14px; border: 1px solid #d1d5db; }
+            .image-grid { display: table; width: 100%; table-layout: fixed; }
+            .image-cell { display: table-cell; width: 50%; padding-right: 12px; vertical-align: top; }
+          </style>
+        </head>
+        <body>
+          <h1>无人机航拍图像巡检分析报告</h1>
+          <p class="meta">生成时间：${escapeHtml(generatedAt)}</p>
+          <p class="meta">图片名称：${escapeHtml(result.value.original_filename)}</p>
+          <p class="meta">检测模式：${escapeHtml(result.value.detection_mode_label || selectedDetectionMode.value.label)}</p>
+          <p class="meta">启用模型：${escapeHtml(formatModelsUsed(result.value.models_used || [])) || '未记录'}</p>
 
-        <h2>一、检测摘要</h2>
-        <p>检测目标总数：${result.value.total_count}</p>
-        <p>场景类型：${escapeHtml(analysis.value.scene_type)}</p>
-        <p>综合风险：<span class="risk">${escapeHtml(analysis.value.risk_level)}</span></p>
-        <p>风险评分：${analysis.value.risk_score}</p>
-        <div class="summary">${escapeHtml(result.value.report)}</div>
+          <h2>一、检测摘要</h2>
+          <p>检测目标总数：${escapeHtml(result.value.total_count)}</p>
+          <p>场景类型：${escapeHtml(currentAnalysis?.scene_type || '未识别到明确巡检场景')}</p>
+          <p>综合风险：<span class="risk">${escapeHtml(currentAnalysis?.risk_level || '未评估')}</span></p>
+          <p>风险评分：${escapeHtml(currentAnalysis?.risk_score ?? '--')}</p>
+          ${sceneTags ? `<p>${sceneTags}</p>` : ''}
+          <div class="summary">${escapeHtml(result.value.report || currentAnalysis?.summary || '暂无自动分析报告')}</div>
 
-        <h2>二、检测结果图</h2>
-        ${resultImageDataUrl ? `<img src="${resultImageDataUrl}" alt="检测结果图">` : '<p>检测结果图导出失败，请在系统中查看。</p>'}
+          <h2>二、图片对比</h2>
+          <div class="image-grid">
+            <div class="image-cell">
+              <h3>原始图片</h3>
+              ${originalImageDataUrl ? `<img src="${originalImageDataUrl}" alt="原始图片">` : '<p>当前会话没有可导出的原始图片预览。</p>'}
+            </div>
+            <div class="image-cell">
+              <h3>检测结果图</h3>
+              ${resultImageDataUrl ? `<img src="${resultImageDataUrl}" alt="检测结果图">` : '<p>检测结果图导出失败，请在系统中查看。</p>'}
+            </div>
+          </div>
 
-        <h2>三、类别数量统计</h2>
-        <table>
-          <thead><tr><th>类别</th><th>数量</th></tr></thead>
-          <tbody>${classRows || '<tr><td colspan="2">暂无检测目标</td></tr>'}</tbody>
-        </table>
+          <h2>三、类别数量统计</h2>
+          <table>
+            <thead><tr><th>类别</th><th>数量</th></tr></thead>
+            <tbody>${classRows || '<tr><td colspan="2">暂无检测目标</td></tr>'}</tbody>
+          </table>
 
-        <h2>四、异常模块分析</h2>
-        <table>
-          <thead>
-            <tr><th>模块</th><th>状态</th><th>评分</th><th>原因</th><th>建议</th></tr>
-          </thead>
-          <tbody>${moduleRows}</tbody>
-        </table>
+          <h2>四、异常模块分析</h2>
+          <table>
+            <thead>
+              <tr><th>模块</th><th>状态</th><th>评分</th><th>原因</th><th>建议</th></tr>
+            </thead>
+            <tbody>${moduleRows || '<tr><td colspan="5">暂无异常模块分析</td></tr>'}</tbody>
+          </table>
 
-        <h2>五、综合巡检建议</h2>
-        <p>${escapeHtml(overallRecommendation.value)}</p>
-        <h3>后续操作</h3>
-        <ol>${actionItems}</ol>
-      </body>
-    </html>
-  `
+          <h2>五、目标明细</h2>
+          <table>
+            <thead><tr><th>序号</th><th>类别</th><th>模型来源</th><th>置信度</th><th>面积</th></tr></thead>
+            <tbody>${detectionRows || '<tr><td colspan="5">暂无检测目标</td></tr>'}</tbody>
+          </table>
 
-  const blob = new Blob(['\ufeff', html], { type: 'application/msword;charset=utf-8' })
-  const link = document.createElement('a')
-  const fileBaseName = (result.value.original_filename || 'inspection-result').replace(/\.[^.]+$/, '')
-  link.href = URL.createObjectURL(blob)
-  link.download = `${fileBaseName}-巡检分析报告.doc`
-  document.body.appendChild(link)
-  link.click()
-  document.body.removeChild(link)
-  URL.revokeObjectURL(link.href)
+          <h2>六、综合巡检建议</h2>
+          <p>${escapeHtml(overallRecommendation.value || '暂无综合巡检建议')}</p>
+          <h3>后续操作</h3>
+          <ol>${actionItems || '<li>保存检测结果，作为本次巡检记录。</li>'}</ol>
+        </body>
+      </html>
+    `
+
+    const blob = new Blob(['\ufeff', html], { type: 'application/msword;charset=utf-8' })
+    downloadBlob(blob, `${safeFileName(result.value.original_filename)}-巡检分析报告.doc`)
+    exportMessage.value = '巡检文档已开始下载，请在浏览器下载记录中查看。'
+  } catch (error) {
+    console.error(error)
+    exportError.value = '巡检文档导出失败，请稍后重试'
+  } finally {
+    exportLoading.value = false
+  }
 }
 
 function renderCharts() {
@@ -1129,8 +1307,10 @@ function formatDateTime(value) {
 <style scoped>
 .page {
   min-height: 100vh;
-  background: #f5f7fb;
-  color: #1f2937;
+  background:
+    radial-gradient(circle at top left, rgba(45, 212, 191, 0.16), transparent 34rem),
+    linear-gradient(180deg, #edf3f8 0%, #f8fafc 48%, #eef3f8 100%);
+  color: #172033;
 }
 
 .login-page {
@@ -1222,9 +1402,11 @@ function formatDateTime(value) {
 
 .header {
   position: relative;
-  padding: 34px 24px 30px;
+  padding: 34px 24px 24px;
   text-align: center;
-  background: linear-gradient(135deg, #1e3a8a, #2563eb);
+  background:
+    linear-gradient(135deg, rgba(15, 23, 42, 0.94), rgba(30, 64, 175, 0.9)),
+    url('/src/assets/hero.png') center / cover no-repeat;
   color: white;
 }
 
@@ -1250,16 +1432,68 @@ function formatDateTime(value) {
 .header h1 {
   margin: 8px 0 0;
   color: #ffffff;
-  font-size: 34px;
+  font-size: clamp(24px, 3vw, 34px);
   font-weight: 700;
 }
 
 .system-name {
   margin: 0;
-  color: #bfdbfe;
+  color: #b8f3e6;
   font-size: 15px;
   font-weight: 800;
   letter-spacing: 0.08em;
+}
+
+.main-nav {
+  width: min(620px, 100%);
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 8px;
+  margin: 22px auto 0;
+  padding: 6px;
+  border: 1px solid rgba(255, 255, 255, 0.18);
+  border-radius: 8px;
+  background: rgba(15, 23, 42, 0.34);
+  backdrop-filter: blur(10px);
+}
+
+.main-nav button {
+  min-width: 0;
+  min-height: 38px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 7px;
+  padding: 8px 10px;
+  border: 1px solid transparent;
+  border-radius: 6px;
+  background: transparent;
+  color: #dbeafe;
+  font-size: 13px;
+  font-weight: 800;
+}
+
+.main-nav button span {
+  display: inline-grid;
+  place-items: center;
+  width: 18px;
+  height: 18px;
+  border-radius: 5px;
+  background: rgba(255, 255, 255, 0.14);
+  font-size: 13px;
+  line-height: 1;
+}
+
+.main-nav button.active {
+  background: #ffffff;
+  color: #1e3a8a;
+  box-shadow: 0 10px 24px rgba(15, 23, 42, 0.2);
+}
+
+.main-nav button:disabled {
+  background: transparent;
+  color: rgba(219, 234, 254, 0.48);
+  cursor: not-allowed;
 }
 
 .page-actions {
@@ -1304,9 +1538,9 @@ function formatDateTime(value) {
   gap: 32px;
   padding: 34px;
   overflow: hidden;
-  border-radius: 12px;
+  border-radius: 8px;
   background:
-    linear-gradient(90deg, rgba(15, 23, 42, 0.82), rgba(15, 23, 42, 0.28)),
+    linear-gradient(90deg, rgba(15, 23, 42, 0.84), rgba(19, 78, 74, 0.28)),
     url('/src/assets/hero.png') center / cover no-repeat;
   color: #ffffff;
   box-shadow: 0 10px 26px rgba(15, 23, 42, 0.16);
@@ -1343,7 +1577,7 @@ function formatDateTime(value) {
 .welcome-actions {
   display: flex;
   flex-wrap: wrap;
-  justify-content: center;
+  justify-content: flex-start;
   gap: 12px;
 }
 
@@ -1361,9 +1595,69 @@ function formatDateTime(value) {
   min-height: 310px;
   padding: 20px;
   border: 1px solid rgba(255, 255, 255, 0.2);
-  border-radius: 10px;
+  border-radius: 8px;
   background: rgba(15, 23, 42, 0.72);
   backdrop-filter: blur(10px);
+}
+
+.status-grid {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 14px;
+}
+
+.status-grid article {
+  min-width: 0;
+  display: grid;
+  gap: 8px;
+  padding: 18px;
+  border: 1px solid #dbe4f0;
+  border-radius: 8px;
+  background: rgba(255, 255, 255, 0.88);
+  box-shadow: 0 8px 22px rgba(15, 23, 42, 0.07);
+  text-align: left;
+}
+
+.status-grid span {
+  color: #64748b;
+  font-size: 13px;
+  font-weight: 800;
+}
+
+.status-grid strong {
+  min-height: 32px;
+  color: #0f172a;
+  font-size: 24px;
+  line-height: 1.15;
+  word-break: break-word;
+}
+
+.status-grid small {
+  overflow: hidden;
+  color: #64748b;
+  font-size: 12px;
+  line-height: 1.55;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.status-grid .stat-success,
+.status-grid .risk-normal {
+  color: #047857;
+}
+
+.status-grid .stat-warning,
+.status-grid .risk-medium {
+  color: #c2410c;
+}
+
+.status-grid .stat-info,
+.status-grid .risk-low {
+  color: #1d4ed8;
+}
+
+.status-grid .risk-high {
+  color: #b91c1c;
 }
 
 .console-header {
@@ -1482,7 +1776,7 @@ function formatDateTime(value) {
 
 .workflow-card {
   padding: 24px;
-  border-radius: 12px;
+  border-radius: 8px;
   background: #ffffff;
   box-shadow: 0 8px 24px rgba(15, 23, 42, 0.08);
 }
@@ -1591,7 +1885,8 @@ function formatDateTime(value) {
 
 .card {
   background: white;
-  border-radius: 16px;
+  border: 1px solid #e5edf5;
+  border-radius: 8px;
   padding: 22px;
   margin-bottom: 22px;
   box-shadow: 0 8px 24px rgba(15, 23, 42, 0.08);
@@ -1659,6 +1954,12 @@ function formatDateTime(value) {
   background: #065f46;
 }
 
+.export-status {
+  margin: -6px 0 14px;
+  text-align: right;
+  font-size: 13px;
+}
+
 .tab-stack {
   display: block;
 }
@@ -1668,7 +1969,7 @@ function formatDateTime(value) {
   place-items: center;
   min-height: 190px;
   border: 2px dashed #bfdbfe;
-  border-radius: 10px;
+  border-radius: 8px;
   background: #f8fbff;
   text-align: center;
   transition:
@@ -1754,7 +2055,7 @@ function formatDateTime(value) {
   margin-top: 18px;
   padding: 14px 16px;
   border: 1px solid #dbe4f0;
-  border-radius: 10px;
+  border-radius: 8px;
   background: #f8fafc;
   text-align: left;
 }
@@ -1834,7 +2135,7 @@ button {
   background: #2563eb;
   color: white;
   padding: 10px 18px;
-  border-radius: 10px;
+  border-radius: 8px;
   font-size: 15px;
   cursor: pointer;
 }
@@ -1851,7 +2152,7 @@ button:disabled {
 .preview img,
 .image-panel img {
   max-width: 100%;
-  border-radius: 12px;
+  border-radius: 8px;
   border: 1px solid #e5e7eb;
 }
 
@@ -1928,7 +2229,7 @@ button:disabled {
 
 .image-panel-trigger {
   border-color: #e5e7eb;
-  border-radius: 12px;
+  border-radius: 8px;
 }
 
 .compare-empty {
@@ -2070,7 +2371,7 @@ button:disabled {
   display: grid;
   grid-template-rows: auto minmax(0, 1fr);
   overflow: hidden;
-  border-radius: 12px;
+  border-radius: 8px;
   background: #ffffff;
   box-shadow: 0 24px 80px rgba(15, 23, 42, 0.36);
 }
@@ -2477,6 +2778,10 @@ th {
   margin-top: 16px;
 }
 
+.success {
+  color: #047857;
+}
+
 .empty {
   color: #6b7280;
 }
@@ -2498,6 +2803,7 @@ th {
   .metric-grid,
   .recommendation-grid,
   .feature-grid,
+  .status-grid,
   .workflow-steps {
     grid-template-columns: 1fr;
   }
@@ -2508,7 +2814,7 @@ th {
   }
 
   .header {
-    padding-top: 78px;
+    padding: 78px 16px 20px;
   }
 
   .page-actions {
@@ -2575,6 +2881,18 @@ th {
     grid-template-columns: 1fr;
     min-height: 300px;
     padding: 24px;
+  }
+
+  .main-nav {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .main-nav button {
+    min-height: 40px;
+  }
+
+  .status-grid small {
+    white-space: normal;
   }
 
   .console-preview {
