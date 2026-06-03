@@ -57,14 +57,24 @@
       <section v-if="activePage === 'home'" class="home-page">
         <div class="welcome-band">
           <div class="welcome-copy">
-            <span>UAV Inspection Analysis</span>
-            <h2>欢迎使用无人机航拍异常检测工作台</h2>
-            <p>
+            <span class="welcome-eyebrow">UAV Inspection Analysis</span>
+            <h2>
+              <span>无人机航拍</span>
+              <span>异常检测</span>
+              <span>工作台</span>
+            </h2>
+            <p class="welcome-lead">
               系统面向航拍图像巡检场景，提供目标识别、场景理解、异常分析、统计图表和巡检建议生成能力。
             </p>
             <div class="welcome-actions">
-              <button type="button" @click="switchMainPage('upload')">开始上传图片</button>
-              <button class="secondary-button" type="button" @click="switchMainPage('logs')">查看检测日志</button>
+              <button class="hero-action primary-action" type="button" @click="switchMainPage('upload')">
+                <span class="action-label">开始上传图片</span>
+                <span class="action-arrow">→</span>
+              </button>
+              <button class="hero-action secondary-button" type="button" @click="switchMainPage('logs')">
+                <span class="action-label">查看检测日志</span>
+                <span class="action-arrow">→</span>
+              </button>
             </div>
           </div>
           <div class="cvat-showcase" aria-label="动态检测工作台预览">
@@ -1864,6 +1874,7 @@ function formatDateTime(value) {
 }
 
 .welcome-band {
+  position: relative;
   min-height: 500px;
   display: grid;
   grid-template-columns: minmax(360px, 0.88fr) minmax(560px, 1.12fr);
@@ -1879,11 +1890,24 @@ function formatDateTime(value) {
   box-shadow: 0 12px 28px rgba(15, 23, 42, 0.18);
 }
 
+.welcome-band::before {
+  content: "";
+  position: absolute;
+  inset: 0;
+  background:
+    linear-gradient(115deg, rgba(255, 255, 255, 0.18), transparent 26%),
+    radial-gradient(circle at 18% 34%, rgba(251, 191, 36, 0.18), transparent 32%);
+  opacity: 0.72;
+  pointer-events: none;
+}
+
 .welcome-copy {
+  position: relative;
+  z-index: 1;
   max-width: 680px;
 }
 
-.welcome-band span {
+.welcome-eyebrow {
   display: inline-flex;
   margin-bottom: 12px;
   color: #bfdbfe;
@@ -1891,20 +1915,47 @@ function formatDateTime(value) {
   font-weight: 800;
   letter-spacing: 0.08em;
   text-transform: uppercase;
+  opacity: 0;
+  animation: hero-reveal 0.85s ease forwards;
 }
 
 .welcome-band h2 {
   max-width: 620px;
   margin: 0;
   color: #ffffff;
-  font-size: 32px;
+  font-size: clamp(48px, 6vw, 86px);
+  font-weight: 500;
+  line-height: 1.08;
 }
 
-.welcome-band p {
+.welcome-band h2 span {
+  display: block;
+  opacity: 0;
+  transform: translateY(32px);
+  animation: hero-reveal 0.95s cubic-bezier(0.21, 0.8, 0.24, 1) forwards;
+}
+
+.welcome-band h2 span:nth-child(1) {
+  animation-delay: 0.16s;
+}
+
+.welcome-band h2 span:nth-child(2) {
+  animation-delay: 0.32s;
+}
+
+.welcome-band h2 span:nth-child(3) {
+  animation-delay: 0.48s;
+}
+
+.welcome-lead {
   max-width: 660px;
-  margin: 14px 0 22px;
+  margin: 26px 0 34px;
   color: #e0f2fe;
+  font-size: 22px;
   line-height: 1.8;
+  opacity: 0;
+  transform: translateY(24px);
+  animation: hero-reveal 0.9s ease 0.62s forwards;
 }
 
 .welcome-actions {
@@ -1912,16 +1963,94 @@ function formatDateTime(value) {
   display: flex;
   flex-wrap: wrap;
   justify-content: flex-start;
-  gap: 12px;
+  gap: 16px;
+  opacity: 0;
+  transform: translateY(24px);
+  animation: hero-reveal 0.9s ease 0.78s forwards;
+}
+
+.hero-action {
+  position: relative;
+  min-width: 220px;
+  min-height: 72px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 24px;
+  overflow: hidden;
+  padding: 18px 28px;
+  border-radius: 8px;
+  font-size: 18px;
+  font-weight: 800;
+  isolation: isolate;
+}
+
+.hero-action::before {
+  content: "";
+  position: absolute;
+  inset: 0;
+  z-index: -1;
+  background: linear-gradient(120deg, transparent, rgba(255, 255, 255, 0.22), transparent);
+  transform: translateX(-120%);
+  transition: transform 0.45s ease;
+}
+
+.hero-action:hover::before {
+  transform: translateX(120%);
+}
+
+.hero-action:not(:disabled):hover {
+  transform: translateY(-4px);
+}
+
+.primary-action {
+  background: linear-gradient(90deg, #2563eb, #c78311);
+  box-shadow: 0 18px 34px rgba(2, 6, 23, 0.3);
 }
 
 .secondary-button {
-  border: 1px solid rgba(255, 255, 255, 0.32);
-  background: rgba(255, 255, 255, 0.14);
+  border: 3px solid rgba(255, 255, 255, 0.9);
+  background: rgba(0, 0, 0, 0.22);
   color: #ffffff;
 }
 
+.primary-action:hover {
+  box-shadow: 0 24px 44px rgba(37, 99, 235, 0.34);
+}
+
+.secondary-button:hover {
+  background: rgba(255, 255, 255, 0.12);
+  border-color: #ffffff;
+  box-shadow: 0 18px 34px rgba(255, 255, 255, 0.12);
+}
+
+.action-label,
+.action-arrow {
+  position: relative;
+  z-index: 1;
+}
+
+.action-label {
+  min-width: 0;
+  white-space: nowrap;
+}
+
+.action-arrow {
+  display: inline-grid;
+  place-items: center;
+  min-width: 48px;
+  font-size: 34px;
+  line-height: 1;
+  transition: transform 0.22s ease;
+}
+
+.hero-action:hover .action-arrow {
+  transform: translateX(8px);
+}
+
 .cvat-showcase {
+  position: relative;
+  z-index: 1;
   align-self: stretch;
   min-height: 390px;
   display: grid;
@@ -2192,6 +2321,20 @@ function formatDateTime(value) {
   45% {
     opacity: 1;
     transform: scale(1.015);
+  }
+}
+
+@keyframes hero-reveal {
+  from {
+    opacity: 0;
+    transform: translateY(36px);
+    filter: blur(12px);
+  }
+
+  to {
+    opacity: 1;
+    transform: translateY(0);
+    filter: blur(0);
   }
 }
 
@@ -3841,6 +3984,28 @@ th {
     padding: 24px;
   }
 
+  .welcome-lead {
+    margin: 20px 0 24px;
+    font-size: 17px;
+  }
+
+  .welcome-actions {
+    gap: 12px;
+  }
+
+  .hero-action {
+    width: 100%;
+    min-width: 0;
+    min-height: 58px;
+    padding: 14px 18px;
+    font-size: 16px;
+  }
+
+  .action-arrow {
+    min-width: 34px;
+    font-size: 28px;
+  }
+
   .main-nav {
     grid-template-columns: repeat(2, minmax(0, 1fr));
   }
@@ -3875,7 +4040,7 @@ th {
   }
 
   .welcome-band h2 {
-    font-size: 26px;
+    font-size: clamp(40px, 12vw, 58px);
   }
 
   .section-title {
