@@ -140,7 +140,7 @@
         <section class="workflow-card">
           <div class="section-heading">
             <h2>系统流程</h2>
-            <p>从航拍图像输入到异常判断，形成完整的巡检分析闭环。</p>
+            <p>上传图片后自动完成目标识别、异常分析和巡检建议生成。</p>
           </div>
           <div class="workflow-steps">
             <article>
@@ -165,21 +165,6 @@
             </article>
           </div>
         </section>
-
-        <div class="feature-grid">
-          <article>
-            <h3>场景要素识别</h3>
-            <p>识别车辆、道路、建筑、树木、水域等关键航拍要素。</p>
-          </article>
-          <article>
-            <h3>异常模块分析</h3>
-            <p>围绕车辆越界、交通密度、水域周边风险和检测可信度进行分析。</p>
-          </article>
-          <article>
-            <h3>巡检建议生成</h3>
-            <p>根据风险等级和异常模块，自动生成可执行的后续巡检建议。</p>
-          </article>
-        </div>
       </section>
 
       <section v-if="activePage === 'upload'" class="card upload-card">
@@ -1870,7 +1855,7 @@ function formatDateTime(value) {
 
 .home-page {
   display: grid;
-  gap: 22px;
+  gap: 18px;
 }
 
 .welcome-band {
@@ -2352,14 +2337,14 @@ function formatDateTime(value) {
 .status-grid {
   display: grid;
   grid-template-columns: repeat(4, minmax(0, 1fr));
-  gap: 14px;
+  gap: 12px;
 }
 
 .status-grid article {
   min-width: 0;
   display: grid;
-  gap: 8px;
-  padding: 18px;
+  gap: 6px;
+  padding: 14px 16px;
   border: 1px solid #dbe4f0;
   border-radius: 8px;
   background: rgba(255, 255, 255, 0.88);
@@ -2374,9 +2359,9 @@ function formatDateTime(value) {
 }
 
 .status-grid strong {
-  min-height: 32px;
+  min-height: 28px;
   color: #0f172a;
-  font-size: 24px;
+  font-size: 22px;
   line-height: 1.15;
   word-break: break-word;
 }
@@ -2524,7 +2509,7 @@ function formatDateTime(value) {
 }
 
 .workflow-card {
-  padding: 24px;
+  padding: 18px;
   border-radius: 8px;
   background: #ffffff;
   box-shadow: 0 8px 24px rgba(15, 23, 42, 0.08);
@@ -2535,7 +2520,7 @@ function formatDateTime(value) {
   align-items: flex-end;
   justify-content: space-between;
   gap: 18px;
-  margin-bottom: 18px;
+  margin-bottom: 14px;
   text-align: left;
 }
 
@@ -2545,10 +2530,10 @@ function formatDateTime(value) {
 }
 
 .section-heading p {
-  max-width: 520px;
+  max-width: 640px;
   margin: 0;
   color: #64748b;
-  line-height: 1.7;
+  line-height: 1.55;
 }
 
 .workflow-steps {
@@ -2568,7 +2553,7 @@ function formatDateTime(value) {
   column-gap: 10px;
   align-items: start;
   min-height: 0;
-  padding: 16px;
+  padding: 14px;
   border-right: 1px solid #dbe4f0;
   background: transparent;
   text-align: left;
@@ -2592,7 +2577,7 @@ function formatDateTime(value) {
 }
 
 .workflow-steps h3 {
-  margin: 0 0 5px;
+  margin: 0 0 4px;
   color: #111827;
   font-size: 15px;
 }
@@ -2602,34 +2587,8 @@ function formatDateTime(value) {
   margin: 0;
   color: #64748b;
   font-size: 13px;
-  line-height: 1.55;
+  line-height: 1.45;
   word-break: normal;
-}
-
-.feature-grid {
-  display: grid;
-  grid-template-columns: repeat(3, 1fr);
-  gap: 18px;
-}
-
-.feature-grid article {
-  min-height: 150px;
-  padding: 22px;
-  border-radius: 8px;
-  background: #ffffff;
-  box-shadow: 0 8px 24px rgba(15, 23, 42, 0.08);
-  text-align: left;
-}
-
-.feature-grid h3 {
-  margin: 0 0 10px;
-  color: #111827;
-}
-
-.feature-grid p {
-  margin: 0;
-  color: #64748b;
-  line-height: 1.75;
 }
 
 .card {
@@ -3903,7 +3862,6 @@ th {
   .module-grid,
   .metric-grid,
   .recommendation-grid,
-  .feature-grid,
   .status-grid,
   .workflow-steps {
     grid-template-columns: 1fr;
