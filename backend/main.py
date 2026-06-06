@@ -8,6 +8,7 @@ from datetime import datetime, timedelta, timezone
 import cv2
 import hashlib
 import hmac
+import numpy as np
 import shutil
 import secrets
 import sqlite3
@@ -240,6 +241,10 @@ def center_of_box(box):
     return ((box["x1"] + box["x2"]) / 2, (box["y1"] + box["y2"]) / 2)
 
 
+def bottom_center_of_box(box):
+    return ((box["x1"] + box["x2"]) / 2, box["y2"])
+
+
 def point_in_box(point, box):
     x, y = point
     return box["x1"] <= x <= box["x2"] and box["y1"] <= y <= box["y2"]
@@ -262,6 +267,53 @@ def is_fine_person(item):
     return item.get("model_role") == "fine_target" and item["class_name"] in VISDRONE_PERSON_CLASSES
 
 
+def simplify_polygon(points):
+    if points is None or len(points) < 3:
+        return []
+
+    contour = np.asarray(points, dtype=np.float32)
+    perimeter = cv2.arcLength(contour, True)
+    epsilon = max(1.0, perimeter * 0.002)
+    simplified = cv2.approxPolyDP(contour, epsilon, True).reshape(-1, 2)
+    return [[round(float(x), 2), round(float(y), 2)] for x, y in simplified]
+
+
+def polygon_area(polygon):
+    if not polygon or len(polygon) < 3:
+        return 0
+    contour = np.asarray(polygon, dtype=np.float32)
+    return float(abs(cv2.contourArea(contour)))
+
+
+def point_in_polygon(point, polygon):
+    if not polygon or len(polygon) < 3:
+        return False
+
+    contour = np.asarray(polygon, dtype=np.float32)
+    return cv2.pointPolygonTest(contour, point, False) >= 0
+
+
+def point_near_polygon(point, polygon, max_distance):
+    if not polygon or len(polygon) < 3:
+        return False
+
+    contour = np.asarray(polygon, dtype=np.float32)
+    distance = cv2.pointPolygonTest(contour, point, True)
+    return distance >= -max_distance
+
+
+def point_in_detection_mask(point, detection):
+    mask = detection.get("mask") or {}
+    polygon = mask.get("polygon") or []
+    return point_in_polygon(point, polygon)
+
+
+def point_near_detection_mask(point, detection, max_distance):
+    mask = detection.get("mask") or {}
+    polygon = mask.get("polygon") or []
+    return point_near_polygon(point, polygon, max_distance)
+
+
 def run_yolo_detection(yolo_model, image_path, model_role, conf=0.25):
     results = yolo_model(str(image_path), conf=conf)
     detections = []
@@ -272,13 +324,17 @@ def run_yolo_detection(yolo_model, image_path, model_role, conf=0.25):
         if result.orig_shape:
             image_height, image_width = result.orig_shape
 
-        for box in result.boxes:
+        mask_polygons = []
+        if result.masks is not None:
+            mask_polygons = [simplify_polygon(points) for points in result.masks.xy]
+
+        for index, box in enumerate(result.boxes):
             cls_id = int(box.cls[0])
             cls_name = yolo_model.names[cls_id]
             confidence = float(box.conf[0])
             x1, y1, x2, y2 = box.xyxy[0].tolist()
 
-            detections.append({
+            item = {
                 "class_id": cls_id,
                 "class_name": cls_name,
                 "confidence": round(confidence, 4),
@@ -290,7 +346,16 @@ def run_yolo_detection(yolo_model, image_path, model_role, conf=0.25):
                     "y2": round(y2, 2)
                 },
                 "area": round((x2 - x1) * (y2 - y1), 2)
-            })
+            }
+
+            if index < len(mask_polygons) and mask_polygons[index]:
+                item["mask"] = {
+                    "polygon": mask_polygons[index],
+                    "area": round(polygon_area(mask_polygons[index]), 2),
+                }
+                item["area"] = item["mask"]["area"]
+
+            detections.append(item)
 
     return detections, image_width, image_height
 
@@ -310,6 +375,14 @@ def draw_detection_result(image_path, output_path, detections):
         x1, y1, x2, y2 = [int(box[key]) for key in ("x1", "y1", "x2", "y2")]
         color = colors.get(item.get("model_role"), (255, 255, 255))
         label = f"{item['class_name']} {item['confidence']:.2f}"
+
+        polygon = (item.get("mask") or {}).get("polygon") or []
+        if len(polygon) >= 3:
+            contour = np.asarray(polygon, dtype=np.int32)
+            overlay = image.copy()
+            cv2.fillPoly(overlay, [contour], color)
+            image = cv2.addWeighted(overlay, 0.18, image, 0.82, 0)
+            cv2.polylines(image, [contour], True, color, 2)
 
         cv2.rectangle(image, (x1, y1), (x2, y2), color, 2)
         label_y = max(y1 - 8, 16)
@@ -404,31 +477,68 @@ def analyze_scene(detections, class_count, image_width, image_height, fine_detec
 
     offroad_vehicles = []
     road_vehicle_count = 0
+    road_match_method_count = {"mask": 0, "box": 0}
     for vehicle in vehicles:
         vehicle_box = vehicle["box"]
         vehicle_area = max(1, box_area(vehicle_box))
+        ground_point = bottom_center_of_box(vehicle_box)
         matched = False
+        matched_by_mask = False
         for road in roads:
-            road_box = road["box"]
-            overlap_ratio = intersection_area(vehicle_box, road_box) / vehicle_area
-            if overlap_ratio >= 0.15 or point_in_box(center_of_box(vehicle_box), road_box):
+            if point_in_detection_mask(ground_point, road):
                 matched = True
+                matched_by_mask = True
                 break
+
+            if "mask" not in road:
+                road_box = road["box"]
+                overlap_ratio = intersection_area(vehicle_box, road_box) / vehicle_area
+                if overlap_ratio >= 0.15 or point_in_box(ground_point, road_box):
+                    matched = True
+                    break
+
+        vehicle["ground_point"] = {
+            "x": round(ground_point[0], 2),
+            "y": round(ground_point[1], 2),
+        }
+
         if matched:
             road_vehicle_count += 1
+            if matched_by_mask:
+                road_match_method_count["mask"] += 1
+            else:
+                road_match_method_count["box"] += 1
         else:
-            offroad_vehicles.append(vehicle)
+            for road in roads:
+                road_box = road["box"]
+                overlap_ratio = intersection_area(vehicle_box, road_box) / vehicle_area
+                if overlap_ratio >= 0.25:
+                    matched = True
+                    road_match_method_count["box"] += 1
+                    break
+
+            if matched:
+                road_vehicle_count += 1
+            else:
+                offroad_vehicles.append(vehicle)
+
+    has_road_masks = any("mask" in road for road in roads)
+    match_description = "道路分割区域" if has_road_masks else "道路检测框"
 
     offroad_count = len(offroad_vehicles)
     if vehicle_count and roads:
         offroad_rate = offroad_count / vehicle_count
         vehicle_score = min(85, offroad_count * 18 + offroad_rate * 45)
         vehicle_reason = (
-            f"共检测到 {vehicle_count} 个车辆目标，其中 {offroad_count} 个未与道路区域形成有效重叠。"
+            f"共检测到 {vehicle_count} 个车辆目标，其中 {offroad_count} 个未落入{match_description}。"
         )
+        if has_road_masks:
+            vehicle_reason += (
+                f"道路内车辆中 {road_match_method_count['mask']} 个由车辆底部中心点匹配到道路 mask。"
+            )
         vehicle_suggestion = (
-            "建议复核非道路车辆位置，判断是否为停车区域、异常停放或检测框偏移。"
-            if offroad_count else "车辆目标主要位于道路区域内，暂未发现明显越界车辆。"
+            "建议复核未落入道路分割区域的车辆，重点判断是否位于停车区、禁停区、人行道或绿化带。"
+            if offroad_count else "车辆目标的底部中心点主要位于道路区域内，暂未发现明显越界车辆。"
         )
     elif vehicle_count and not roads:
         vehicle_score = 35
@@ -467,18 +577,24 @@ def analyze_scene(detections, class_count, image_width, image_height, fine_detec
     if waters:
         margin_x = image_width * 0.04
         margin_y = image_height * 0.04
+        max_distance = max(margin_x, margin_y)
         for vehicle in vehicles:
-            center = center_of_box(vehicle["box"])
-            if any(point_in_box(center, expanded_box(water["box"], margin_x, margin_y)) for water in waters):
+            ground_point = bottom_center_of_box(vehicle["box"])
+            if any(point_near_detection_mask(ground_point, water, max_distance) for water in waters if "mask" in water):
+                water_near_vehicle += 1
+            elif any(point_in_box(ground_point, expanded_box(water["box"], margin_x, margin_y)) for water in waters):
                 water_near_vehicle += 1
 
     water_near_person = 0
     if waters:
         margin_x = image_width * 0.04
         margin_y = image_height * 0.04
+        max_distance = max(margin_x, margin_y)
         for person in fine_people:
-            center = center_of_box(person["box"])
-            if any(point_in_box(center, expanded_box(water["box"], margin_x, margin_y)) for water in waters):
+            ground_point = bottom_center_of_box(person["box"])
+            if any(point_near_detection_mask(ground_point, water, max_distance) for water in waters if "mask" in water):
+                water_near_person += 1
+            elif any(point_in_box(ground_point, expanded_box(water["box"], margin_x, margin_y)) for water in waters):
                 water_near_person += 1
 
     if waters and (water_near_vehicle or water_near_person):
@@ -575,6 +691,8 @@ def analyze_scene(detections, class_count, image_width, image_height, fine_detec
             "person_count": len(fine_people),
             "road_vehicle_count": road_vehicle_count,
             "offroad_vehicle_count": offroad_count,
+            "road_mask_vehicle_count": road_match_method_count["mask"],
+            "road_box_vehicle_count": road_match_method_count["box"],
             "water_near_vehicle_count": water_near_vehicle,
             "water_near_person_count": water_near_person,
             "low_confidence_count": low_conf_count,
