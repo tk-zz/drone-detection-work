@@ -41,6 +41,13 @@ DETECTION_MODES = {
     "scene": "粗粒度场景检测",
     "fine": "细粒度目标检测",
 }
+VIDEO_EXTENSIONS = {".mp4", ".mov", ".avi", ".mkv", ".webm", ".m4v"}
+IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".png", ".bmp", ".webp"}
+DEFAULT_FRAME_SAMPLE_COUNT = 3
+MAX_VIDEO_SAMPLING_ATTEMPTS = 3
+VIDEO_QUALITY_THRESHOLD = 45
+VIDEO_PREFILTER_CANDIDATE_MULTIPLIER = 4
+VIDEO_VOTING_TOP_K = 3
 
 VISDRONE_VEHICLE_CLASSES = {
     "bicycle",
@@ -53,6 +60,9 @@ VISDRONE_VEHICLE_CLASSES = {
     "motor",
 }
 VISDRONE_PERSON_CLASSES = {"pedestrian", "people"}
+SCENE_VEHICLE_CLASSES = {"vehicle"}
+SCENE_PERSON_CLASSES = {"person"}
+FUSION_IOU_THRESHOLD = 0.5
 
 UPLOAD_DIR.mkdir(exist_ok=True)
 RESULT_DIR.mkdir(exist_ok=True)
@@ -69,6 +79,7 @@ if VISDRONE_MODEL_PATH.exists():
 
 # 让浏览器可以访问检测结果图片
 app.mount("/results", StaticFiles(directory=str(RESULT_DIR)), name="results")
+app.mount("/uploads", StaticFiles(directory=str(UPLOAD_DIR)), name="uploads")
 
 
 class LoginRequest(BaseModel):
@@ -229,6 +240,13 @@ def box_area(box):
     return max(0, box["x2"] - box["x1"]) * max(0, box["y2"] - box["y1"])
 
 
+def box_iou(box_a, box_b):
+    union = box_area(box_a) + box_area(box_b) - intersection_area(box_a, box_b)
+    if union <= 0:
+        return 0.0
+    return intersection_area(box_a, box_b) / union
+
+
 def intersection_area(box_a, box_b):
     x1 = max(box_a["x1"], box_b["x1"])
     y1 = max(box_a["y1"], box_b["y1"])
@@ -315,10 +333,16 @@ def point_near_detection_mask(point, detection, max_distance):
 
 
 def run_yolo_detection(yolo_model, image_path, model_role, conf=0.25):
-    results = yolo_model(str(image_path), conf=conf)
     detections = []
     image_width = 0
     image_height = 0
+
+    results = yolo_model.predict(
+        source=str(image_path),
+        conf=conf,
+        stream=True,
+        verbose=False,
+    )
 
     for result in results:
         if result.orig_shape:
@@ -358,6 +382,395 @@ def run_yolo_detection(yolo_model, image_path, model_role, conf=0.25):
             detections.append(item)
 
     return detections, image_width, image_height
+
+
+def canonical_detection_group(item):
+    class_name = item["class_name"]
+    if class_name in VISDRONE_VEHICLE_CLASSES or class_name in SCENE_VEHICLE_CLASSES:
+        return "vehicle"
+    if class_name in VISDRONE_PERSON_CLASSES or class_name in SCENE_PERSON_CLASSES:
+        return "person"
+    return class_name
+
+
+def preferred_model_role_for_group(group_name):
+    if group_name in {"vehicle", "person"}:
+        return "fine_target"
+    return "scene"
+
+
+def choose_preferred_detection(primary_item, candidate_item):
+    primary_group = canonical_detection_group(primary_item)
+    preferred_role = preferred_model_role_for_group(primary_group)
+
+    if primary_item["model_role"] == candidate_item["model_role"]:
+        return primary_item if primary_item["confidence"] >= candidate_item["confidence"] else candidate_item
+
+    if primary_item["model_role"] == preferred_role:
+        return primary_item
+    if candidate_item["model_role"] == preferred_role:
+        return candidate_item
+    return primary_item if primary_item["confidence"] >= candidate_item["confidence"] else candidate_item
+
+
+def merge_duplicate_candidates(detections):
+    merged = []
+    for item in detections:
+        replaced = False
+        item_group = canonical_detection_group(item)
+        for index, kept_item in enumerate(merged):
+            if canonical_detection_group(kept_item) != item_group:
+                continue
+            if box_iou(item["box"], kept_item["box"]) < FUSION_IOU_THRESHOLD:
+                continue
+
+            merged[index] = choose_preferred_detection(kept_item, item)
+            replaced = True
+            break
+
+        if not replaced:
+            merged.append(item)
+    return merged
+
+
+def fuse_model_detections(scene_detections, fine_detections):
+    scene_semantic_detections = []
+    scene_candidate_detections = []
+    for item in scene_detections:
+        if canonical_detection_group(item) in {"vehicle", "person"}:
+            scene_candidate_detections.append(item)
+        else:
+            scene_semantic_detections.append(item)
+
+    fused_target_detections = merge_duplicate_candidates(scene_candidate_detections + fine_detections)
+    fused_scene_candidates = [item for item in fused_target_detections if item["model_role"] == "scene"]
+    fused_fine_detections = [item for item in fused_target_detections if item["model_role"] == "fine_target"]
+    fused_scene_detections = scene_semantic_detections + fused_scene_candidates
+
+    return {
+        "scene_detections": fused_scene_detections,
+        "fine_detections": fused_fine_detections,
+        "detections": fused_scene_detections + fused_fine_detections,
+    }
+
+
+def build_upload_url(file_name):
+    return f"/uploads/{file_name}"
+
+
+def build_result_url(file_name):
+    return f"/results/{file_name}"
+
+
+def detect_media_kind(file: UploadFile):
+    suffix = Path(file.filename or "").suffix.lower()
+    content_type = (file.content_type or "").lower()
+
+    if content_type.startswith("video/") or suffix in VIDEO_EXTENSIONS:
+        return "video"
+    if content_type.startswith("image/") or suffix in IMAGE_EXTENSIONS:
+        return "image"
+    raise HTTPException(status_code=400, detail="仅支持图片或视频文件上传")
+
+
+def save_upload_file(upload: UploadFile, target_path: Path):
+    with open(target_path, "wb") as buffer:
+        shutil.copyfileobj(upload.file, buffer)
+
+
+def compute_visual_quality(frame, previous_gray=None):
+    gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+    sharpness = cv2.Laplacian(gray, cv2.CV_64F).var()
+    brightness = float(np.mean(gray))
+    edge_density = float(np.count_nonzero(cv2.Canny(gray, 80, 160))) / max(1, gray.size)
+    motion_delta = 0.0
+    if previous_gray is not None and previous_gray.shape == gray.shape:
+        motion_delta = float(np.mean(cv2.absdiff(gray, previous_gray)))
+
+    brightness_score = max(0.0, 1.0 - min(abs(brightness - 128.0) / 128.0, 1.0))
+    return {
+        "gray": gray,
+        "sharpness": round(float(sharpness), 2),
+        "brightness": round(brightness, 2),
+        "brightness_score": round(brightness_score * 100, 2),
+        "edge_density": round(edge_density * 100, 2),
+        "motion_delta": round(motion_delta, 2),
+        "prefilter_score": round(
+            min(45.0, sharpness / 12.0)
+            + brightness_score * 20.0
+            + min(20.0, edge_density * 160.0)
+            + min(15.0, motion_delta / 3.0),
+            2,
+        ),
+    }
+
+
+def score_frame_quality(detections, analysis, visual_quality=None):
+    if not detections:
+        return 0.0
+
+    average_confidence = sum(item["confidence"] for item in detections) / len(detections)
+    low_confidence_count = analysis["metrics"]["low_confidence_count"]
+    scene_bonus = 8 if analysis["scene_type"] != "未识别到明确巡检场景" else 0
+    module_bonus = sum(1 for module in analysis["modules"] if module["score"] >= 20) * 3
+    key_class_bonus = 0
+    if analysis["metrics"]["vehicle_count"] > 0:
+        key_class_bonus += 6
+    if "道路区域" in analysis["scene_tags"]:
+        key_class_bonus += 6
+    if "水域周边" in analysis["scene_tags"]:
+        key_class_bonus += 4
+    visual_bonus = min(18.0, (visual_quality or {}).get("prefilter_score", 0.0) * 0.18)
+    quality_score = (
+        min(30, len(detections) * 6)
+        + average_confidence * 35
+        + scene_bonus
+        + module_bonus
+        + key_class_bonus
+        + visual_bonus
+        - low_confidence_count * 4
+    )
+    return round(max(0.0, quality_score), 2)
+
+
+def run_detection_pipeline(image_path, detection_mode):
+    raw_scene_detections = []
+    raw_fine_detections = []
+    image_width = 0
+    image_height = 0
+    models_used = []
+
+    if detection_mode in {"fusion", "scene"}:
+        raw_scene_detections, image_width, image_height = run_yolo_detection(
+            scene_model,
+            image_path,
+            "scene",
+            conf=0.25,
+        )
+        models_used.append("scene")
+
+    if detection_mode in {"fusion", "fine"} and visdrone_model:
+        raw_fine_detections, fine_width, fine_height = run_yolo_detection(
+            visdrone_model,
+            image_path,
+            "fine_target",
+            conf=0.25,
+        )
+        image_width = image_width or fine_width
+        image_height = image_height or fine_height
+        models_used.append("visdrone")
+
+    fused_detection_data = fuse_model_detections(raw_scene_detections, raw_fine_detections)
+    scene_detections = fused_detection_data["scene_detections"]
+    fine_detections = fused_detection_data["fine_detections"]
+    detections = fused_detection_data["detections"]
+    class_count = {}
+    for item in detections:
+        name = item["class_name"]
+        class_count[name] = class_count.get(name, 0) + 1
+
+    analysis = analyze_scene(scene_detections, class_count, image_width, image_height, fine_detections)
+    quality_score = score_frame_quality(detections, analysis)
+
+    return {
+        "scene_detections": scene_detections,
+        "fine_detections": fine_detections,
+        "detections": detections,
+        "class_count": class_count,
+        "analysis": analysis,
+        "image_width": image_width,
+        "image_height": image_height,
+        "models_used": models_used,
+        "quality_score": quality_score,
+        "fusion": {
+            "raw_scene_count": len(raw_scene_detections),
+            "raw_fine_count": len(raw_fine_detections),
+            "fused_scene_count": len(scene_detections),
+            "fused_fine_count": len(fine_detections),
+            "removed_duplicates": len(raw_scene_detections) + len(raw_fine_detections) - len(detections),
+        },
+    }
+
+
+def extract_video_frames(video_path, output_prefix, attempt_index, frame_count):
+    capture = cv2.VideoCapture(str(video_path))
+    if not capture.isOpened():
+        raise HTTPException(status_code=400, detail="视频文件无法读取，请确认格式是否正确")
+
+    total_frames = int(capture.get(cv2.CAP_PROP_FRAME_COUNT) or 0)
+    fps = float(capture.get(cv2.CAP_PROP_FPS) or 0.0)
+    if total_frames <= 0:
+        capture.release()
+        raise HTTPException(status_code=400, detail="视频中未读取到有效帧")
+
+    usable_frames = max(total_frames - 1, 1)
+    step = usable_frames / (frame_count + 1)
+    attempt_offset = (attempt_index / (MAX_VIDEO_SAMPLING_ATTEMPTS + 1)) * step
+    frame_indices = []
+    for position in range(frame_count):
+        candidate_index = int(min(usable_frames, round((position + 1) * step + attempt_offset)))
+        if candidate_index not in frame_indices:
+            frame_indices.append(candidate_index)
+
+    candidate_multiplier = max(2, VIDEO_PREFILTER_CANDIDATE_MULTIPLIER)
+    candidate_indices = []
+    candidate_count = max(frame_count, frame_count * candidate_multiplier)
+    candidate_step = usable_frames / (candidate_count + 1)
+    for position in range(candidate_count):
+        candidate_index = int(min(usable_frames, round((position + 1) * candidate_step + attempt_offset)))
+        if candidate_index not in candidate_indices:
+            candidate_indices.append(candidate_index)
+
+    candidate_frames = []
+    previous_gray = None
+    for candidate_index in candidate_indices:
+        capture.set(cv2.CAP_PROP_POS_FRAMES, candidate_index)
+        ok, frame = capture.read()
+        if not ok or frame is None:
+            continue
+        visual_quality = compute_visual_quality(frame, previous_gray)
+        previous_gray = visual_quality.pop("gray")
+        candidate_frames.append(
+            {
+                "frame_index": candidate_index,
+                "frame": frame,
+                "visual_quality": visual_quality,
+            }
+        )
+
+    candidate_frames.sort(
+        key=lambda item: (item["visual_quality"]["prefilter_score"], item["visual_quality"]["sharpness"]),
+        reverse=True,
+    )
+    selected_candidates = sorted(candidate_frames[:frame_count], key=lambda item: item["frame_index"])
+
+    extracted_frames = []
+    for local_index, candidate in enumerate(selected_candidates):
+        frame_index = candidate["frame_index"]
+        frame = candidate["frame"]
+        frame_name = f"{output_prefix}_attempt{attempt_index + 1}_frame{local_index + 1}.jpg"
+        frame_path = UPLOAD_DIR / frame_name
+        cv2.imwrite(str(frame_path), frame)
+        timestamp_ms = round((frame_index / fps) * 1000, 2) if fps > 0 else None
+        extracted_frames.append(
+            {
+                "frame_index": frame_index,
+                "timestamp_ms": timestamp_ms,
+                "path": frame_path,
+                "source_image_url": build_upload_url(frame_name),
+                "visual_quality": candidate["visual_quality"],
+            }
+        )
+
+    capture.release()
+    return {
+        "fps": round(fps, 3) if fps > 0 else 0,
+        "total_frames": total_frames,
+        "duration_ms": round((total_frames / fps) * 1000, 2) if fps > 0 else None,
+        "frames": extracted_frames,
+        "candidate_count": len(candidate_frames),
+    }
+
+
+def build_report(
+    detection_mode,
+    scene_detections,
+    fine_detections,
+    detections,
+    class_count,
+    analysis,
+    fusion_summary=None,
+    media_summary="",
+):
+    if detections:
+        main_class = max(class_count, key=class_count.get)
+        fine_target_count = len(fine_detections)
+        fusion_text = ""
+        if fusion_summary and fusion_summary["removed_duplicates"] > 0:
+            fusion_text = f"融合去重后剔除了 {fusion_summary['removed_duplicates']} 个重复目标。"
+        return (
+            f"本次采用{DETECTION_MODES[detection_mode]}{media_summary}，共检测到 {len(detections)} 个目标。"
+            f"其中场景要素 {len(scene_detections)} 个，细粒度目标 {fine_target_count} 个。"
+            f"其中数量最多的类别为 {main_class}，共 {class_count[main_class]} 个。"
+            f"{fusion_text}"
+            f"{analysis['summary']}"
+        )
+
+    return (
+        f"本次采用{DETECTION_MODES[detection_mode]}{media_summary}，未检测到当前模型可识别的目标。"
+        "可能原因是图像中目标不属于当前模型类别，或目标过小、置信度较低。"
+    )
+
+
+def aggregate_frame_detections(frame_candidates):
+    if not frame_candidates:
+        return None, None, []
+
+    ranked_candidates = sorted(
+        frame_candidates,
+        key=lambda item: (
+            item["detection"]["quality_score"],
+            item["detection"]["analysis"]["risk_score"],
+            len(item["detection"]["detections"]),
+        ),
+        reverse=True,
+    )
+    top_candidates = ranked_candidates[:VIDEO_VOTING_TOP_K]
+    best_candidate = top_candidates[0]
+
+    scene_type_votes = {}
+    risk_level_votes = {}
+    class_presence = {}
+    quality_scores = []
+    risk_scores = []
+    total_count_sum = 0
+    class_count_peak = {}
+
+    for candidate in top_candidates:
+        detection = candidate["detection"]
+        analysis = detection["analysis"]
+        scene_type = analysis["scene_type"]
+        risk_level = analysis["risk_level"]
+        scene_type_votes[scene_type] = scene_type_votes.get(scene_type, 0) + 1
+        risk_level_votes[risk_level] = risk_level_votes.get(risk_level, 0) + 1
+        quality_scores.append(detection["quality_score"])
+        risk_scores.append(analysis["risk_score"])
+        total_count_sum += len(detection["detections"])
+
+        for class_name, count in detection["class_count"].items():
+            class_presence[class_name] = class_presence.get(class_name, 0) + 1
+            class_count_peak[class_name] = max(class_count_peak.get(class_name, 0), count)
+
+    stable_classes = sorted(
+        [name for name, vote_count in class_presence.items() if vote_count >= max(2, len(top_candidates) - 1)]
+    )
+    voted_scene_type = max(scene_type_votes.items(), key=lambda item: (item[1], item[0] == best_candidate["detection"]["analysis"]["scene_type"]))[0]
+    voted_risk_level = max(risk_level_votes.items(), key=lambda item: (item[1], item[0] == best_candidate["detection"]["analysis"]["risk_level"]))[0]
+
+    aggregated_analysis = dict(best_candidate["detection"]["analysis"])
+    aggregated_analysis["scene_type"] = voted_scene_type
+    aggregated_analysis["risk_level"] = voted_risk_level
+    aggregated_analysis["risk_score"] = round(max(risk_scores), 1)
+    aggregated_analysis["summary"] = (
+        f"{best_candidate['detection']['analysis']['summary']}"
+        f" 视频多帧投票共参考 {len(top_candidates)} 帧，稳定类别包括："
+        f"{'、'.join(stable_classes) if stable_classes else '暂无稳定类别'}。"
+    )
+    aggregated_analysis["video_consensus"] = {
+        "frames_used": len(top_candidates),
+        "stable_classes": stable_classes,
+        "scene_type_votes": scene_type_votes,
+        "risk_level_votes": risk_level_votes,
+        "average_quality_score": round(sum(quality_scores) / len(quality_scores), 2),
+        "average_total_count": round(total_count_sum / len(top_candidates), 2),
+    }
+
+    aggregated_detection = dict(best_candidate["detection"])
+    aggregated_detection["analysis"] = aggregated_analysis
+    aggregated_detection["class_count"] = class_count_peak
+    aggregated_detection["quality_score"] = round(sum(quality_scores) / len(quality_scores), 2)
+    aggregated_detection["video_consensus"] = aggregated_analysis["video_consensus"]
+    return aggregated_detection, best_candidate, top_candidates
 
 
 def draw_detection_result(image_path, output_path, detections):
@@ -781,75 +1194,149 @@ async def detect_image(
     if detection_mode == "fine" and visdrone_model is None:
         raise HTTPException(status_code=503, detail="细粒度 VisDrone 模型未加载，暂不能使用细粒度检测")
 
+    media_kind = detect_media_kind(file)
+
     # 生成唯一文件名，避免重复覆盖
-    file_ext = Path(file.filename).suffix
+    file_ext = Path(file.filename or "").suffix.lower()
     file_id = str(uuid.uuid4())
     upload_path = UPLOAD_DIR / f"{file_id}{file_ext}"
     result_img_path = RESULT_DIR / f"{file_id}_result.jpg"
     result_json_path = RESULT_DIR / f"{file_id}_result.json"
+    source_image_path = None
+    source_image_url = None
+    video_sampling = None
 
-    # 保存上传图片
-    with open(upload_path, "wb") as buffer:
-        shutil.copyfileobj(file.file, buffer)
+    save_upload_file(file, upload_path)
 
-    # 根据检测模式选择模型：场景模型识别道路/建筑/树木/水域等，VisDrone 模型补充行人和细粒度车辆。
-    scene_detections = []
-    fine_detections = []
-    image_width = 0
-    image_height = 0
-    models_used = []
-
-    if detection_mode in {"fusion", "scene"}:
-        scene_detections, image_width, image_height = run_yolo_detection(
-            scene_model,
-            upload_path,
-            "scene",
-            conf=0.25,
-        )
-        models_used.append("scene")
-
-    if detection_mode in {"fusion", "fine"} and visdrone_model:
-        fine_detections, fine_width, fine_height = run_yolo_detection(
-            visdrone_model,
-            upload_path,
-            "fine_target",
-            conf=0.25,
-        )
-        image_width = image_width or fine_width
-        image_height = image_height or fine_height
-        models_used.append("visdrone")
-
-    detections = scene_detections + fine_detections
-    draw_detection_result(upload_path, result_img_path, detections)
-
-    # 类别数量统计
-    class_count = {}
-    for item in detections:
-        name = item["class_name"]
-        class_count[name] = class_count.get(name, 0) + 1
-
-    analysis = analyze_scene(scene_detections, class_count, image_width, image_height, fine_detections)
-
-    # 自动分析报告
-    if detections:
-        main_class = max(class_count, key=class_count.get)
-        fine_target_count = len(fine_detections)
-        report = (
-            f"本次采用{DETECTION_MODES[detection_mode]}，共检测到 {len(detections)} 个目标。"
-            f"其中场景要素 {len(scene_detections)} 个，细粒度目标 {fine_target_count} 个。"
-            f"其中数量最多的类别为 {main_class}，共 {class_count[main_class]} 个。"
-            f"{analysis['summary']}"
+    if media_kind == "image":
+        detection_data = run_detection_pipeline(upload_path, detection_mode)
+        source_image_path = upload_path
+        source_image_url = build_upload_url(upload_path.name)
+        report = build_report(
+            detection_mode,
+            detection_data["scene_detections"],
+            detection_data["fine_detections"],
+            detection_data["detections"],
+            detection_data["class_count"],
+            detection_data["analysis"],
+            fusion_summary=detection_data["fusion"],
         )
     else:
-        report = (
-            f"本次采用{DETECTION_MODES[detection_mode]}，未检测到当前模型可识别的目标。"
-            "可能原因是图像中目标不属于当前模型类别，或目标过小、置信度较低。"
+        best_candidate = None
+        attempts = []
+        video_meta = None
+
+        for attempt_index in range(MAX_VIDEO_SAMPLING_ATTEMPTS):
+            sample_count = DEFAULT_FRAME_SAMPLE_COUNT + attempt_index
+            sampling_result = extract_video_frames(upload_path, file_id, attempt_index, sample_count)
+            video_meta = {
+                "fps": sampling_result["fps"],
+                "total_frames": sampling_result["total_frames"],
+                "duration_ms": sampling_result["duration_ms"],
+            }
+
+            sampled_frames = []
+            attempt_candidates = []
+            for frame in sampling_result["frames"]:
+                frame_detection = run_detection_pipeline(frame["path"], detection_mode)
+                frame_quality_score = score_frame_quality(
+                    frame_detection["detections"],
+                    frame_detection["analysis"],
+                    frame.get("visual_quality"),
+                )
+                frame_detection["quality_score"] = frame_quality_score
+                attempt_candidates.append(
+                    {
+                        "frame": frame,
+                        "detection": frame_detection,
+                        "attempt_index": attempt_index,
+                    }
+                )
+                sampled_frames.append(
+                    {
+                        "frame_index": frame["frame_index"],
+                        "timestamp_ms": frame["timestamp_ms"],
+                        "quality_score": frame_quality_score,
+                        "total_count": len(frame_detection["detections"]),
+                        "risk_level": frame_detection["analysis"]["risk_level"],
+                        "source_image_url": frame["source_image_url"],
+                        "visual_quality": frame.get("visual_quality"),
+                    }
+                )
+
+            aggregated_detection, attempt_best_candidate, voted_candidates = aggregate_frame_detections(attempt_candidates)
+            if aggregated_detection is None:
+                continue
+            candidate = {
+                "frame": attempt_best_candidate["frame"],
+                "detection": aggregated_detection,
+                "attempt_index": attempt_index,
+                "voted_frames": voted_candidates,
+            }
+            if best_candidate is None or candidate["detection"]["quality_score"] > best_candidate["detection"]["quality_score"]:
+                best_candidate = candidate
+
+            attempts.append(
+                {
+                    "attempt": attempt_index + 1,
+                    "sample_count": sample_count,
+                    "candidate_count": sampling_result["candidate_count"],
+                    "passed": bool(best_candidate and best_candidate["attempt_index"] == attempt_index and best_candidate["detection"]["quality_score"] >= VIDEO_QUALITY_THRESHOLD),
+                    "frames": sampled_frames,
+                }
+            )
+
+            if best_candidate and best_candidate["detection"]["quality_score"] >= VIDEO_QUALITY_THRESHOLD:
+                break
+
+        if best_candidate is None:
+            raise HTTPException(status_code=400, detail="视频抽帧失败，未读取到可检测帧")
+
+        detection_data = best_candidate["detection"]
+        source_image_path = best_candidate["frame"]["path"]
+        source_image_url = best_candidate["frame"]["source_image_url"]
+        selected_frame = best_candidate["frame"]
+        video_sampling = {
+            **(video_meta or {}),
+            "attempts_used": best_candidate["attempt_index"] + 1,
+            "max_attempts": MAX_VIDEO_SAMPLING_ATTEMPTS,
+            "quality_threshold": VIDEO_QUALITY_THRESHOLD,
+            "threshold_met": detection_data["quality_score"] >= VIDEO_QUALITY_THRESHOLD,
+            "selected_frame": {
+                "frame_index": selected_frame["frame_index"],
+                "timestamp_ms": selected_frame["timestamp_ms"],
+                "source_image_url": selected_frame["source_image_url"],
+                "quality_score": detection_data["quality_score"],
+            },
+            "consensus": detection_data.get("video_consensus"),
+            "attempts": attempts,
+        }
+        report = build_report(
+            detection_mode,
+            detection_data["scene_detections"],
+            detection_data["fine_detections"],
+            detection_data["detections"],
+            detection_data["class_count"],
+            detection_data["analysis"],
+            fusion_summary=detection_data["fusion"],
+            media_summary=f"，视频抽帧共尝试 {video_sampling['attempts_used']} 轮，选中第 {selected_frame['frame_index']} 帧",
         )
+
+    scene_detections = detection_data["scene_detections"]
+    fine_detections = detection_data["fine_detections"]
+    detections = detection_data["detections"]
+    class_count = detection_data["class_count"]
+    analysis = detection_data["analysis"]
+    models_used = detection_data["models_used"]
+
+    draw_detection_result(source_image_path, result_img_path, detections)
 
     # 保存 JSON
     result_data = {
         "image_id": file_id,
         "original_filename": file.filename,
+        "input_type": media_kind,
+        "media_type_label": "视频" if media_kind == "video" else "图片",
         "detection_mode": detection_mode,
         "detection_mode_label": DETECTION_MODES[detection_mode],
         "models_used": models_used,
@@ -871,10 +1358,13 @@ async def detect_image(
                 "error": visdrone_model_error,
             },
         },
-        "result_image_url": f"/results/{file_id}_result.jpg",
-        "result_json_url": f"/results/{file_id}_result.json",
+        "source_image_url": source_image_url,
+        "result_image_url": build_result_url(f"{file_id}_result.jpg"),
+        "result_json_url": build_result_url(f"{file_id}_result.json"),
         "report": report,
-        "analysis": analysis
+        "analysis": analysis,
+        "fusion": detection_data["fusion"],
+        "video_sampling": video_sampling,
     }
 
     with open(result_json_path, "w", encoding="utf-8") as f:
