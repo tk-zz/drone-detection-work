@@ -64,11 +64,11 @@
               <span>工作台</span>
             </h2>
             <p class="welcome-lead">
-              系统面向航拍图像巡检场景，提供目标识别、场景理解、异常分析、统计图表和巡检建议生成能力。
+              系统面向航拍图像与视频巡检场景，提供目标识别、场景理解、异常分析、统计图表和巡检建议生成能力。
             </p>
             <div class="welcome-actions">
               <button class="hero-action primary-action" type="button" @click="switchMainPage('upload')">
-                <span class="action-label">开始上传图片</span>
+                <span class="action-label">开始上传媒体</span>
                 <span class="action-arrow">→</span>
               </button>
               <button class="hero-action secondary-button" type="button" @click="switchMainPage('logs')">
@@ -140,13 +140,13 @@
         <section class="workflow-card">
           <div class="section-heading">
             <h2>系统流程</h2>
-            <p>上传图片后自动完成目标识别、异常分析和巡检建议生成。</p>
+            <p>上传图片或视频后自动完成目标识别、异常分析和巡检建议生成。</p>
           </div>
           <div class="workflow-steps">
             <article>
               <span>01</span>
               <h3>上传航拍图像</h3>
-              <p>选择无人机航拍图片，系统读取原图并生成预览。</p>
+              <p>选择无人机航拍图片或视频，系统读取原始内容并生成预览。</p>
             </article>
             <article>
               <span>02</span>
@@ -168,7 +168,7 @@
       </section>
 
       <section v-if="activePage === 'upload'" class="card upload-card">
-        <h2>图片上传</h2>
+        <h2>媒体上传</h2>
 
         <div
           :class="['dropzone', { dragging: isDraggingFile, ready: selectedFiles.length }]"
@@ -178,18 +178,18 @@
           @drop.prevent="handleFileDrop"
         >
           <label class="dropzone-picker">
-            <input type="file" accept="image/*" multiple @change="handleFileChange" />
+            <input type="file" accept="image/*,video/*" multiple @change="handleFileChange" />
             <span class="dropzone-icon">+</span>
             <strong>{{ selectedFileLabel }}</strong>
             <small>
-              {{ selectedFiles.length ? '已选择图片，可重新拖入或点击更换整批文件' : '支持 jpg、png 等常见图片格式，也可以点击选择多张图片' }}
+              {{ selectedFiles.length ? '已选择媒体文件，可重新拖入或点击更换整批文件' : '支持 jpg、png、mp4、mov 等常见图片和视频格式，也可以点击选择多份文件' }}
             </small>
           </label>
         </div>
 
-        <div v-if="selectedFiles.length" class="selected-file-list" aria-label="已选择图片列表">
+        <div v-if="selectedFiles.length" class="selected-file-list" aria-label="已选择媒体列表">
           <div class="batch-summary">
-            <strong>已选择 {{ selectedFiles.length }} 张图片</strong>
+            <strong>已选择 {{ selectedFiles.length }} 个文件</strong>
             <span v-if="batchProgress.total">
               已完成 {{ batchProgress.completed }}/{{ batchProgress.total }}
               <template v-if="batchProgress.failed">，失败 {{ batchProgress.failed }}</template>
@@ -238,7 +238,7 @@
         <div v-if="currentPreview" class="preview">
           <div class="preview-header">
             <div>
-              <h3>原始图片预览</h3>
+              <h3>{{ currentPreview?.kind === 'video' ? '原始视频首帧预览' : '原始文件预览' }}</h3>
               <p>{{ currentPreview.file.name }}（{{ activePreviewIndex + 1 }}/{{ selectedImagePreviews.length }}）</p>
             </div>
             <div v-if="selectedImagePreviews.length > 1" class="pager-controls">
@@ -261,23 +261,23 @@
               v-if="selectedImagePreviews.length > 1"
               class="preview-arrow preview-arrow-left"
               type="button"
-              aria-label="查看上一张原始图片"
+              aria-label="查看上一份原始文件"
               @click.stop="showPreviousPreview"
             >
               ‹
             </button>
-            <img :src="currentPreview.url" alt="原始图片" draggable="false" />
+            <img :src="currentPreview.posterUrl || currentPreview.url" :alt="currentPreview.kind === 'video' ? '视频首帧预览' : '原始图片'" draggable="false" />
             <button
               v-if="selectedImagePreviews.length > 1"
               class="preview-arrow preview-arrow-right"
               type="button"
-              aria-label="查看下一张原始图片"
+              aria-label="查看下一份原始文件"
               @click.stop="showNextPreview"
             >
               ›
             </button>
           </div>
-          <div v-if="selectedImagePreviews.length > 1" class="preview-strip" aria-label="原始图片缩略图列表">
+          <div v-if="selectedImagePreviews.length > 1" class="preview-strip" aria-label="原始文件缩略图列表">
             <button
               v-for="(item, index) in selectedImagePreviews"
               :key="`${item.file.name}-${item.file.size}-${item.file.lastModified}`"
@@ -285,7 +285,7 @@
               type="button"
               @click="setActivePreview(index)"
             >
-              <img :src="item.url" :alt="item.file.name" />
+              <img :src="item.posterUrl || item.url" :alt="item.file.name" />
               <span>{{ index + 1 }}</span>
             </button>
           </div>
@@ -298,7 +298,7 @@
         <div class="section-heading">
           <div>
             <h2>检测日志</h2>
-            <p>记录每一次图片检测的操作时间、检测模式、目标数量和分析结果。</p>
+                <p>记录每一次图片或视频检测的操作时间、检测模式、目标数量和分析结果。</p>
           </div>
           <button type="button" :disabled="logsLoading" @click="fetchDetectionLogs">
             {{ logsLoading ? '刷新中...' : '刷新日志' }}
@@ -367,7 +367,7 @@
           <div class="section-heading">
             <div>
               <h2>批量检测结果</h2>
-              <p>共完成 {{ batchResults.length }} 张图片检测，当前查看第 {{ activeResultIndex + 1 }} 张。</p>
+              <p>共完成 {{ batchResults.length }} 个文件检测，当前查看第 {{ activeResultIndex + 1 }} 个。</p>
             </div>
             <div class="pager-controls">
               <button type="button" @click="showPreviousResult">上一张</button>
@@ -395,8 +395,8 @@
           <section v-if="batchOverviewItems.length > 1" class="batch-overview-panel">
             <div class="section-heading">
               <div>
-                <h3>批量图片检测概览</h3>
-                <p>每张图片的原图、检测结果和摘要如下，点击卡片可切换下方详情。</p>
+                <h3>批量媒体检测概览</h3>
+                <p>每个文件的原始预览、检测结果和摘要如下，点击卡片可切换下方详情。</p>
               </div>
             </div>
             <div class="batch-overview-grid">
@@ -408,8 +408,8 @@
                 <button type="button" @click="selectBatchResult(index)">
                   <div class="batch-image-pair">
                     <div>
-                      <span>原图</span>
-                      <img :src="item.preview?.url" :alt="`${item.result.original_filename} 原图`" />
+                      <span>{{ item.preview?.kind === 'video' ? '选中帧' : '原图' }}</span>
+                      <img :src="item.sourcePreviewUrl" :alt="`${item.result.original_filename} 原始预览`" />
                     </div>
                     <div>
                       <span>检测图</span>
@@ -427,20 +427,20 @@
           </section>
 
           <section class="compare-panel">
-            <h3>原始图片与检测结果对比</h3>
+            <h3>{{ result.input_type === 'video' ? '选中帧与检测结果对比' : '原始图片与检测结果对比' }}</h3>
             <div class="compare-grid">
               <div>
-                <span>原始图片</span>
+                <span>{{ result.input_type === 'video' ? '选中帧' : '原始图片' }}</span>
                 <button
-                  v-if="currentPreview"
+                  v-if="originalCompareImageUrl"
                   class="image-detail-trigger"
                   type="button"
                   @click="openImageDetail('original')"
                 >
-                  <img :src="currentPreview.url" alt="原始图片" />
+                  <img :src="originalCompareImageUrl" :alt="result.input_type === 'video' ? '选中帧' : '原始图片'" />
                   <span class="image-detail-badge">点击查看详情</span>
                 </button>
-                <p v-else class="empty compare-empty">当前会话暂无原始图片预览。</p>
+                <p v-else class="empty compare-empty">当前会话暂无可对照的原始预览。</p>
               </div>
               <div>
                 <span>检测结果图</span>
@@ -464,15 +464,40 @@
             <div class="summary-panel">
               <h3>检测摘要</h3>
               <p>图片名称：{{ result.original_filename }}</p>
+              <p>输入类型：{{ result.media_type_label || (result.input_type === 'video' ? '视频' : '图片') }}</p>
               <p>检测模式：{{ result.detection_mode_label || selectedDetectionMode.label }}</p>
               <p v-if="result.models_used?.length">启用模型：{{ formatModelsUsed(result.models_used) }}</p>
               <p>检测目标总数：{{ result.total_count }}</p>
+              <p v-if="result.video_sampling?.selected_frame">选中帧：第 {{ result.video_sampling.selected_frame.frame_index }} 帧 · {{ formatTimestampMs(result.video_sampling.selected_frame.timestamp_ms) }}</p>
               <p v-if="analysis">场景类型：{{ analysis.scene_type }}</p>
               <p v-if="analysis">综合风险：<span :class="['risk-badge', riskClass(analysis.risk_level)]">{{ analysis.risk_level }}</span></p>
 
               <h3>自动分析报告</h3>
               <div class="report">
                 {{ result.report }}
+              </div>
+
+              <div v-if="result.video_sampling" class="video-sampling-panel">
+                <h3>视频抽帧信息</h3>
+                <p>抽帧轮次：{{ result.video_sampling.attempts_used }}/{{ result.video_sampling.max_attempts }}</p>
+                <p>质量阈值：{{ result.video_sampling.quality_threshold }}，最终质量分：{{ result.video_sampling.selected_frame?.quality_score ?? '--' }}</p>
+                <p>视频时长：{{ formatDurationMs(result.video_sampling.duration_ms) }}</p>
+                <p>抽帧结果：{{ result.video_sampling.threshold_met ? '达到检测标准' : '未达到阈值，已返回最佳帧' }}</p>
+                <p v-if="result.video_sampling.attempts?.length">
+                  最后一次候选帧数：{{ result.video_sampling.attempts[result.video_sampling.attempts.length - 1]?.candidate_count ?? '--' }}
+                </p>
+              </div>
+
+              <div v-if="videoConsensus" class="video-consensus-panel">
+                <h3>连续帧共识</h3>
+                <div class="video-consensus-grid">
+                  <div v-for="item in videoConsensusRows" :key="item.label">
+                    <span>{{ item.label }}</span>
+                    <strong>{{ item.value }}</strong>
+                  </div>
+                </div>
+                <p>场景投票：{{ formatVoteSummary(videoConsensus.scene_type_votes) }}</p>
+                <p>风险投票：{{ formatVoteSummary(videoConsensus.risk_level_votes) }}</p>
               </div>
             </div>
           </div>
@@ -493,6 +518,25 @@
           <div class="tag-row" v-if="analysis.scene_tags && analysis.scene_tags.length">
             <span v-for="tag in analysis.scene_tags" :key="tag" class="scene-tag">{{ tag }}</span>
           </div>
+
+          <section v-if="videoConsensus" class="video-consensus-card">
+            <div class="section-heading">
+              <div>
+                <h3>连续帧投票结果</h3>
+                <p>视频最终结论来自多帧共识，不再只依赖单帧判断。</p>
+              </div>
+            </div>
+            <div class="video-consensus-grid">
+              <div v-for="item in videoConsensusRows" :key="item.label">
+                <span>{{ item.label }}</span>
+                <strong>{{ item.value }}</strong>
+              </div>
+            </div>
+            <div class="video-consensus-votes">
+              <p>场景投票：{{ formatVoteSummary(videoConsensus.scene_type_votes) }}</p>
+              <p>风险投票：{{ formatVoteSummary(videoConsensus.risk_level_votes) }}</p>
+            </div>
+          </section>
 
           <div class="metric-grid">
             <div class="metric-item">
@@ -638,15 +682,15 @@
           </table>
 
           <p v-else class="empty">
-            当前图片没有检测到自训练航拍场景模型可识别的目标。
+            当前文件没有检测到自训练航拍场景模型可识别的目标。
           </p>
         </section>
       </section>
 
       <section v-if="activePage === 'results' && !result" class="card empty-result">
         <h2>暂无检测结果</h2>
-        <p>请先进入图片上传页面，选择航拍图片并完成智能识别。</p>
-        <button type="button" @click="switchMainPage('upload')">去上传图片</button>
+        <p>请先进入媒体上传页面，选择航拍图片或视频并完成智能识别。</p>
+        <button type="button" @click="switchMainPage('upload')">去上传媒体</button>
       </section>
     </main>
 
@@ -661,7 +705,7 @@
       <div class="image-detail-dialog">
         <div class="image-detail-header">
           <div>
-            <span>图片详情</span>
+            <span>文件详情</span>
             <h2>{{ imageDetailTitle }}</h2>
           </div>
           <button class="image-detail-close" type="button" aria-label="关闭图片详情" @click="closeImageDetail">×</button>
@@ -674,10 +718,10 @@
 
           <aside class="image-detail-info">
             <h3>检测信息</h3>
-            <p>图片名称：{{ result?.original_filename || '当前图片' }}</p>
+            <p>文件名称：{{ result?.original_filename || '当前文件' }}</p>
             <p v-if="result">检测模式：{{ result.detection_mode_label || selectedDetectionMode.label }}</p>
             <p v-if="imageDetailType === 'result' && result">目标总数：{{ result.total_count }}</p>
-            <p v-if="imageDetailType === 'original'">原始图片用于和检测结果进行位置对照。</p>
+            <p v-if="imageDetailType === 'original'">{{ result?.input_type === 'video' ? '当前展示的是视频中用于检测的关键帧。' : '原始图片用于和检测结果进行位置对照。' }}</p>
 
             <div v-if="imageDetailType === 'result'" class="detail-detection-list">
               <h3>目标清单</h3>
@@ -747,18 +791,31 @@ const barChartRef = ref(null)
 const pieChartRef = ref(null)
 
 const analysis = computed(() => result.value?.analysis || null)
+const videoConsensus = computed(() => {
+  return result.value?.video_sampling?.consensus || analysis.value?.video_consensus || result.value?.video_consensus || null
+})
 const currentPreview = computed(() => selectedImagePreviews.value[activePreviewIndex.value] || null)
 const batchOverviewItems = computed(() => {
   return batchResults.value.map(item => ({
     ...item,
-    preview: selectedImagePreviews.value[item.fileIndex] || null
+    preview: selectedImagePreviews.value[item.fileIndex] || null,
+    sourcePreviewUrl: item.result?.source_image_url
+      ? `${backendBaseUrl}${item.result.source_image_url}`
+      : selectedImagePreviews.value[item.fileIndex]?.url || ''
   }))
 })
+const originalCompareImageUrl = computed(() => {
+  if (result.value?.source_image_url) {
+    return `${backendBaseUrl}${result.value.source_image_url}`
+  }
+  return currentPreview.value?.url || ''
+})
 const imageDetailTitle = computed(() => {
-  return imageDetailType.value === 'original' ? '原始图片' : '检测结果图'
+  if (imageDetailType.value === 'result') return '检测结果图'
+  return result.value?.input_type === 'video' ? '视频选中帧' : '原始图片'
 })
 const imageDetailSrc = computed(() => {
-  if (imageDetailType.value === 'original') return currentPreview.value?.url || ''
+  if (imageDetailType.value === 'original') return originalCompareImageUrl.value
   return result.value?.result_image_url ? `${backendBaseUrl}${result.value.result_image_url}` : ''
 })
 const detectionModes = [
@@ -781,9 +838,9 @@ const selectedDetectionMode = computed(() => {
   return detectionModes.find(mode => mode.value === detectionMode.value) || detectionModes[0]
 })
 const selectedFileLabel = computed(() => {
-  if (!selectedFiles.value.length) return '拖拽航拍图片到这里'
+  if (!selectedFiles.value.length) return '拖拽航拍图片或视频到这里'
   if (selectedFiles.value.length === 1) return selectedFiles.value[0].name
-  return `已选择 ${selectedFiles.value.length} 张航拍图片`
+  return `已选择 ${selectedFiles.value.length} 个航拍文件`
 })
 const uploadActionLabel = computed(() => {
   if (!loading.value) {
@@ -798,7 +855,7 @@ const uploadActionLabel = computed(() => {
 })
 const pageTitles = {
   home: '系统首页',
-  upload: '图片上传',
+  upload: '媒体上传',
   results: '检测结果',
   logs: '检测日志'
 }
@@ -825,6 +882,28 @@ const recommendationItems = computed(() => {
     status: module.status,
     suggestion: module.suggestion
   }))
+})
+
+const videoConsensusRows = computed(() => {
+  if (!videoConsensus.value) return []
+  return [
+    {
+      label: '参考帧数',
+      value: videoConsensus.value.frames_used ?? '--'
+    },
+    {
+      label: '平均质量分',
+      value: videoConsensus.value.average_quality_score ?? '--'
+    },
+    {
+      label: '平均目标数',
+      value: videoConsensus.value.average_total_count ?? '--'
+    },
+    {
+      label: '稳定类别',
+      value: videoConsensus.value.stable_classes?.length ? videoConsensus.value.stable_classes.join('、') : '暂无稳定类别'
+    }
+  ]
 })
 
 const recommendationPriority = computed(() => {
@@ -863,7 +942,7 @@ const quickStats = computed(() => [
   {
     label: '当前任务',
     value: result.value ? '已完成' : selectedFiles.value.length ? '待检测' : '未开始',
-    hint: selectedFiles.value.length ? selectedFileLabel.value : '上传一张或多张航拍图像开始分析',
+    hint: selectedFiles.value.length ? selectedFileLabel.value : '上传一张或多份航拍图片或视频开始分析',
     className: result.value ? 'stat-success' : selectedFiles.value.length ? 'stat-warning' : ''
   },
   {
@@ -920,7 +999,7 @@ const followUpActions = computed(() => {
   }
 
   if (metrics.vehicle_count >= 12) {
-    actions.push('对车辆密集区域进行交通密度评估，可结合多张图片判断拥堵趋势。')
+    actions.push('对车辆密集区域进行交通密度评估，可结合多张图片或连续帧判断拥堵趋势。')
   }
 
   if (metrics.low_confidence_count > 0) {
@@ -928,7 +1007,7 @@ const followUpActions = computed(() => {
   }
 
   if (actions.length === 1) {
-    actions.push('继续上传同区域不同角度或不同时刻图片，形成可对比的巡检样本。')
+    actions.push('继续上传同区域不同角度或不同时刻的图片、视频，形成可对比的巡检样本。')
   }
 
   return actions
@@ -970,24 +1049,31 @@ function handleFileChange(event) {
   event.target.value = ''
 }
 
-function setSelectedFiles(fileList) {
+async function setSelectedFiles(fileList) {
   const files = Array.from(fileList || [])
   if (!files.length) return
 
-  const imageFiles = files.filter(file => file.type.startsWith('image/'))
-  if (!imageFiles.length) {
-    errorMessage.value = '请上传 jpg、png 等图片文件'
+  const mediaFiles = files.filter(file => file.type.startsWith('image/') || file.type.startsWith('video/'))
+  if (!mediaFiles.length) {
+    errorMessage.value = '请上传 jpg、png、mp4、mov 等图片或视频文件'
     return
   }
 
-  selectedFiles.value = imageFiles
+  selectedFiles.value = mediaFiles
   revokePreviewUrls()
-  selectedImagePreviews.value = imageFiles.map(file => ({
-    file,
-    url: URL.createObjectURL(file)
+  selectedImagePreviews.value = await Promise.all(mediaFiles.map(async file => {
+    const url = URL.createObjectURL(file)
+    const kind = file.type.startsWith('video/') ? 'video' : 'image'
+    const posterUrl = kind === 'video' ? await createVideoPoster(url) : url
+    return {
+      file,
+      url,
+      kind,
+      posterUrl
+    }
   }))
   activePreviewIndex.value = 0
-  selectedFile.value = imageFiles[0]
+  selectedFile.value = mediaFiles[0]
   previewUrl.value = selectedImagePreviews.value[0]?.url || ''
   batchResults.value = []
   activeResultIndex.value = 0
@@ -1000,13 +1086,18 @@ function setSelectedFiles(fileList) {
     failed: 0,
     currentName: ''
   }
-  if (imageFiles.length < files.length) {
-    errorMessage.value = `已忽略 ${files.length - imageFiles.length} 个非图片文件`
+  if (mediaFiles.length < files.length) {
+    errorMessage.value = `已忽略 ${files.length - mediaFiles.length} 个非媒体文件`
   }
 }
 
 function revokePreviewUrls() {
-  selectedImagePreviews.value.forEach(item => URL.revokeObjectURL(item.url))
+  selectedImagePreviews.value.forEach(item => {
+    if (item.posterUrl && item.posterUrl !== item.url) {
+      URL.revokeObjectURL(item.posterUrl)
+    }
+    URL.revokeObjectURL(item.url)
+  })
   selectedImagePreviews.value = []
   previewUrl.value = ''
 }
@@ -1090,6 +1181,77 @@ function formatFileSize(size) {
   return `${(size / 1024 / 1024).toFixed(1)} MB`
 }
 
+function formatTimestampMs(value) {
+  if (value === null || value === undefined) return '--'
+  return `${(Number(value) / 1000).toFixed(2)} 秒`
+}
+
+function formatDurationMs(value) {
+  if (value === null || value === undefined) return '--'
+  const totalSeconds = Math.round(Number(value) / 1000)
+  const minutes = Math.floor(totalSeconds / 60)
+  const seconds = totalSeconds % 60
+  if (!minutes) return `${seconds} 秒`
+  return `${minutes} 分 ${seconds} 秒`
+}
+
+function formatVoteSummary(votes) {
+  if (!votes || !Object.keys(votes).length) return '暂无投票结果'
+  return Object.entries(votes)
+    .sort((a, b) => Number(b[1]) - Number(a[1]))
+    .map(([label, count]) => `${label} ${count} 票`)
+    .join('，')
+}
+
+function createVideoPoster(videoUrl) {
+  return new Promise(resolve => {
+    const video = document.createElement('video')
+    video.preload = 'metadata'
+    video.muted = true
+    video.playsInline = true
+
+    const fallback = () => resolve(videoUrl)
+    const cleanup = () => {
+      video.pause()
+      video.removeAttribute('src')
+      video.load()
+    }
+
+    video.addEventListener('error', () => {
+      cleanup()
+      fallback()
+    }, { once: true })
+
+    video.addEventListener('loadeddata', () => {
+      try {
+        const canvas = document.createElement('canvas')
+        canvas.width = video.videoWidth || 1280
+        canvas.height = video.videoHeight || 720
+        const context = canvas.getContext('2d')
+        if (!context) {
+          cleanup()
+          fallback()
+          return
+        }
+        context.drawImage(video, 0, 0, canvas.width, canvas.height)
+        canvas.toBlob(blob => {
+          cleanup()
+          if (!blob) {
+            fallback()
+            return
+          }
+          resolve(URL.createObjectURL(blob))
+        }, 'image/jpeg', 0.92)
+      } catch (error) {
+        cleanup()
+        fallback()
+      }
+    }, { once: true })
+
+    video.src = videoUrl
+  })
+}
+
 function handleDragEnter() {
   dragDepth.value += 1
   isDraggingFile.value = true
@@ -1114,7 +1276,7 @@ function handleFileDrop(event) {
 
 async function detectImage() {
   if (!selectedFiles.value.length) {
-    errorMessage.value = '请先选择一张或多张图片'
+    errorMessage.value = '请先选择图片或视频文件'
     return
   }
 
@@ -1178,7 +1340,7 @@ async function detectImage() {
     }
 
     if (batchProgress.value.failed) {
-      errorMessage.value = `批量检测完成，成功 ${batchProgress.value.completed} 张，失败 ${batchProgress.value.failed} 张`
+      errorMessage.value = `批量检测完成，成功 ${batchProgress.value.completed} 个，失败 ${batchProgress.value.failed} 个`
     }
   } catch (error) {
     console.error(error)
@@ -1390,7 +1552,9 @@ async function exportInspectionDocument() {
   let originalImageDataUrl = ''
   let resultImageDataUrl = ''
   try {
-    if (selectedFile.value) {
+    if (result.value?.source_image_url) {
+      originalImageDataUrl = await imageUrlToDataUrl(`${backendBaseUrl}${result.value.source_image_url}`)
+    } else if (selectedFile.value && selectedFile.value.type.startsWith('image/')) {
       originalImageDataUrl = await fileToDataUrl(selectedFile.value)
     }
     if (result.value.result_image_url) {
@@ -1402,6 +1566,7 @@ async function exportInspectionDocument() {
 
   try {
     const currentAnalysis = analysis.value
+    const currentVideoConsensus = videoConsensus.value
     const generatedAt = new Date().toLocaleString('zh-CN', { hour12: false })
     const classRows = Object.entries(result.value.class_count || {})
       .map(([name, count]) => `<tr><td>${escapeHtml(name)}</td><td>${count}</td></tr>`)
@@ -1434,6 +1599,16 @@ async function exportInspectionDocument() {
     const sceneTags = (currentAnalysis?.scene_tags || [])
       .map(tag => `<span class="tag">${escapeHtml(tag)}</span>`)
       .join('')
+    const consensusRows = currentVideoConsensus
+      ? `
+        <p>参考帧数：${escapeHtml(currentVideoConsensus.frames_used ?? '--')}</p>
+        <p>平均质量分：${escapeHtml(currentVideoConsensus.average_quality_score ?? '--')}</p>
+        <p>平均目标数：${escapeHtml(currentVideoConsensus.average_total_count ?? '--')}</p>
+        <p>稳定类别：${escapeHtml(currentVideoConsensus.stable_classes?.length ? currentVideoConsensus.stable_classes.join('、') : '暂无稳定类别')}</p>
+        <p>场景投票：${escapeHtml(formatVoteSummary(currentVideoConsensus.scene_type_votes))}</p>
+        <p>风险投票：${escapeHtml(formatVoteSummary(currentVideoConsensus.risk_level_votes))}</p>
+      `
+      : ''
 
     const html = `
       <!doctype html>
@@ -1461,7 +1636,8 @@ async function exportInspectionDocument() {
         <body>
           <h1>无人机航拍图像巡检分析报告</h1>
           <p class="meta">生成时间：${escapeHtml(generatedAt)}</p>
-          <p class="meta">图片名称：${escapeHtml(result.value.original_filename)}</p>
+          <p class="meta">文件名称：${escapeHtml(result.value.original_filename)}</p>
+          <p class="meta">输入类型：${escapeHtml(result.value.media_type_label || (result.value.input_type === 'video' ? '视频' : '图片'))}</p>
           <p class="meta">检测模式：${escapeHtml(result.value.detection_mode_label || selectedDetectionMode.value.label)}</p>
           <p class="meta">启用模型：${escapeHtml(formatModelsUsed(result.value.models_used || [])) || '未记录'}</p>
 
@@ -1472,12 +1648,13 @@ async function exportInspectionDocument() {
           <p>风险评分：${escapeHtml(currentAnalysis?.risk_score ?? '--')}</p>
           ${sceneTags ? `<p>${sceneTags}</p>` : ''}
           <div class="summary">${escapeHtml(result.value.report || currentAnalysis?.summary || '暂无自动分析报告')}</div>
+          ${currentVideoConsensus ? `<div class="summary">${consensusRows}</div>` : ''}
 
-          <h2>二、图片对比</h2>
+          <h2>二、结果对比</h2>
           <div class="image-grid">
             <div class="image-cell">
-              <h3>原始图片</h3>
-              ${originalImageDataUrl ? `<img src="${originalImageDataUrl}" alt="原始图片">` : '<p>当前会话没有可导出的原始图片预览。</p>'}
+              <h3>${result.value.input_type === 'video' ? '选中帧' : '原始图片'}</h3>
+              ${originalImageDataUrl ? `<img src="${originalImageDataUrl}" alt="${result.value.input_type === 'video' ? '选中帧' : '原始图片'}">` : '<p>当前会话没有可导出的原始预览。</p>'}
             </div>
             <div class="image-cell">
               <h3>检测结果图</h3>
@@ -2978,6 +3155,7 @@ button:disabled {
 }
 
 .preview-carousel img,
+.preview-carousel video,
 .image-panel img {
   max-width: 100%;
   border-radius: 8px;
@@ -2993,7 +3171,8 @@ button:disabled {
   user-select: none;
 }
 
-.preview-carousel img {
+.preview-carousel img,
+.preview-carousel video {
   display: block;
   width: 100%;
   max-height: 520px;
@@ -3052,7 +3231,8 @@ button:disabled {
   box-shadow: 0 8px 18px rgba(37, 99, 235, 0.14);
 }
 
-.preview-strip img {
+.preview-strip img,
+.preview-strip video {
   display: block;
   width: 100%;
   aspect-ratio: 4 / 3;
@@ -3266,6 +3446,63 @@ button:disabled {
   display: block;
   border: 0;
   border-radius: 0;
+}
+
+.video-sampling-panel {
+  margin-top: 16px;
+  padding: 14px 16px;
+  border: 1px solid #dbe4f0;
+  border-radius: 8px;
+  background: #f8fafc;
+}
+
+.video-sampling-panel h3 {
+  margin: 0 0 8px;
+}
+
+.video-sampling-panel p {
+  margin: 6px 0 0;
+}
+
+.video-consensus-panel,
+.video-consensus-card {
+  margin-top: 16px;
+  padding: 14px 16px;
+  border: 1px solid #dbe4f0;
+  border-radius: 8px;
+  background: #f8fafc;
+}
+
+.video-consensus-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 10px;
+  margin-top: 10px;
+}
+
+.video-consensus-grid div {
+  display: grid;
+  gap: 4px;
+  padding: 10px 12px;
+  border-radius: 8px;
+  background: #ffffff;
+  border: 1px solid #e5e7eb;
+}
+
+.video-consensus-grid span {
+  color: #64748b;
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.video-consensus-grid strong {
+  color: #111827;
+  font-size: 15px;
+}
+
+.video-consensus-votes,
+.video-consensus-panel p {
+  margin-top: 10px;
 }
 
 .image-detail-trigger:hover,
