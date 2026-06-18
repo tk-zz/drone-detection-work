@@ -148,7 +148,6 @@
                   <span class="scan-line"></span>
                   <span class="detect-box detect-box-car"><em>vehicle 0.91</em></span>
                   <span class="detect-box detect-box-road"><em>road 0.87</em></span>
-                  <span class="detect-box detect-box-water"><em>water 0.76</em></span>
                 </div>
 
                 <aside class="showcase-panel">
@@ -839,8 +838,6 @@
                         <span v-if="result.video_sampling.temporal_context.module.details.vehicle_edge > 0" class="detail-tag warning">边缘行驶 {{ result.video_sampling.temporal_context.module.details.vehicle_edge }}条</span>
                         <span v-if="result.video_sampling.temporal_context.module.details.vehicle_lane_change > 0" class="detail-tag normal">变道 {{ result.video_sampling.temporal_context.module.details.vehicle_lane_change }}条</span>
                         <span v-if="result.video_sampling.temporal_context.module.details.person_offroad > 0" class="detail-tag danger">行人越界 {{ result.video_sampling.temporal_context.module.details.person_offroad }}条</span>
-                        <span v-if="result.video_sampling.temporal_context.module.details.person_near_water > 0" class="detail-tag danger">行人近水 {{ result.video_sampling.temporal_context.module.details.person_near_water }}条</span>
-                        <span v-if="result.video_sampling.temporal_context.module.details.vehicle_near_water > 0" class="detail-tag danger">车辆近水 {{ result.video_sampling.temporal_context.module.details.vehicle_near_water }}条</span>
                       </div>
                     </div>
                   </div>
@@ -906,8 +903,6 @@
                   <span v-if="result.video_sampling.temporal_context.module.details.vehicle_edge > 0" class="detail-tag warning">边缘行驶 {{ result.video_sampling.temporal_context.module.details.vehicle_edge }}条</span>
                   <span v-if="result.video_sampling.temporal_context.module.details.vehicle_lane_change > 0" class="detail-tag normal">变道 {{ result.video_sampling.temporal_context.module.details.vehicle_lane_change }}条</span>
                   <span v-if="result.video_sampling.temporal_context.module.details.person_offroad > 0" class="detail-tag danger">行人越界 {{ result.video_sampling.temporal_context.module.details.person_offroad }}条</span>
-                  <span v-if="result.video_sampling.temporal_context.module.details.person_near_water > 0" class="detail-tag danger">行人近水 {{ result.video_sampling.temporal_context.module.details.person_near_water }}条</span>
-                  <span v-if="result.video_sampling.temporal_context.module.details.vehicle_near_water > 0" class="detail-tag danger">车辆近水 {{ result.video_sampling.temporal_context.module.details.vehicle_near_water }}条</span>
                 </div>
               </div>
             </section>
@@ -924,10 +919,6 @@
               <div class="metric-item">
                 <span>疑似越界车辆</span>
                 <strong>{{ analysis.metrics.offroad_vehicle_count }}</strong>
-              </div>
-              <div class="metric-item">
-                <span>水域邻近车辆</span>
-                <strong>{{ analysis.metrics.water_near_vehicle_count }}</strong>
               </div>
             </div>
 
@@ -1379,9 +1370,7 @@ const videoConsensusRows = computed(() => {
     { label: '车辆越界', value: details.vehicle_offroad ?? 0, unit: '条' },
     { label: '车辆边缘', value: details.vehicle_edge ?? 0, unit: '条' },
     { label: '车辆变道', value: details.vehicle_lane_change ?? 0, unit: '条' },
-    { label: '行人越界', value: details.person_offroad ?? 0, unit: '条' },
-    { label: '行人近水', value: details.person_near_water ?? 0, unit: '条' },
-    { label: '车辆近水', value: details.vehicle_near_water ?? 0, unit: '条' }
+    { label: '行人越界', value: details.person_offroad ?? 0, unit: '条' }
   ]
 })
 const recommendationPriority = computed(() => {
@@ -1432,9 +1421,9 @@ const overallRecommendation = computed(() => {
     return `${base}建议优先安排人工复核，对异常区域进行二次确认，并结合现场巡检或连续航拍数据判断风险变化。`
   }
   if (risk_level === '中风险') {
-    return `${base}建议将该图像纳入重点复查列表，优先关注车辆分布、道路区域和水域周边目标。`
+    return `${base}建议将该图像纳入重点复查列表，优先关注车辆分布、道路区域目标。`
   }
-  if (metrics?.offroad_vehicle_count > 0 || metrics?.water_near_vehicle_count > 0) {
+  if (metrics?.offroad_vehicle_count > 0) {
     return `${base}虽然综合等级不高，但存在局部目标需要关注，建议针对异常模块进行定点复核。`
   }
   return `${base}暂未发现明显异常，可作为常规巡检记录归档，并在后续批量图像中继续对比观察。`
@@ -1445,7 +1434,6 @@ const followUpActions = computed(() => {
   const actions = ['保存检测结果图和分析报告，作为本次巡检记录。']
   const metrics = analysis.value.metrics || {}
   if (metrics.offroad_vehicle_count > 0) actions.push('复核疑似越界车辆位置，判断是否为停车区域、非道路行驶或检测误差。')
-  if (metrics.water_near_vehicle_count > 0) actions.push('检查水域周边车辆活动，必要时标记为临水安全风险点。')
   if (metrics.vehicle_count >= 12) actions.push('对车辆密集区域进行交通密度评估，可结合多张图片或连续帧判断拥堵趋势。')
   if (metrics.low_confidence_count > 0) actions.push('对低置信度目标进行人工确认，必要时提高图像分辨率后重新检测。')
   if (actions.length === 1) actions.push('继续上传同区域不同角度或不同时刻的图片、视频，形成可对比的巡检样本。')
@@ -3308,19 +3296,6 @@ function formatDateTime(value) {
 
 .detect-box-road em {
   background: #16a34a;
-}
-
-.detect-box-water {
-  left: 58%;
-  top: 70%;
-  width: 24%;
-  height: 15%;
-  border-color: #f59e0b;
-  animation-delay: 1.2s;
-}
-
-.detect-box-water em {
-  background: #d97706;
 }
 
 .showcase-panel div {

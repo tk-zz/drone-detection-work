@@ -34,8 +34,11 @@ from backend.core.constants import (
     VISDRONE_MODEL_PATH,
     VISDRONE_PERSON_CLASSES,
     VISDRONE_VEHICLE_CLASSES,
-    WATER_MIN_CONFIDENCE,
 )
+import sys
+from pathlib import Path
+sys.path.insert(0, str(Path(__file__).parent.parent))
+
 from backend.core.database import init_db
 from backend.core.dependencies import get_current_user
 from backend.routers.auth import router as auth_router
@@ -392,8 +395,6 @@ def score_frame_quality(detections, analysis, visual_quality=None):
         key_class_bonus += 6
     if "道路区域" in analysis["scene_tags"]:
         key_class_bonus += 6
-    if "水域周边" in analysis["scene_tags"]:
-        key_class_bonus += 4
     visual_bonus = min(18.0, (visual_quality or {}).get("prefilter_score", 0.0) * 0.18)
     quality_score = (
         min(30, len(detections) * 6)
@@ -664,10 +665,6 @@ def build_report(
                 danger_items.append(f"车辆变道{details['vehicle_lane_change']}条")
             if details.get("person_offroad", 0) > 0:
                 danger_items.append(f"行人道路外活动{details['person_offroad']}条")
-            if details.get("person_near_water", 0) > 0:
-                danger_items.append(f"行人临近水域{details['person_near_water']}条")
-            if details.get("vehicle_near_water", 0) > 0:
-                danger_items.append(f"车辆临近水域{details['vehicle_near_water']}条")
             
             if danger_items:
                 temporal_text = (
@@ -858,14 +855,13 @@ def vehicle_observations_from_detection(frame_info, detection):
 
 def all_observations_from_detection(frame_info, detection):
     """
-    收集该帧的所有观测数据，包括车辆、行人、水域周边等所有可能存在危险的实体。
+    收集该帧的所有观测数据，包括车辆、行人等所有可能存在危险的实体。
     """
     observations = []
     image_width = max(1, detection.get("image_width") or 1)
     image_height = max(1, detection.get("image_height") or 1)
     analysis = detection.get("analysis", {})
     roads = [item for item in detection.get("scene_detections", []) if item.get("class_name") == "road_area"]
-    waters = [item for item in detection.get("scene_detections", []) if item.get("class_name") == "water"]
     
     # 1. 收集车辆观测
     for vehicle in analysis.get("vehicle_positions", []):
@@ -922,24 +918,6 @@ def all_observations_from_detection(frame_info, detection):
             },
         })
     
-    # 3. 收集水域周边附近的车辆和行人（危险行为）
-    margin_x = image_width * 0.04
-    margin_y = image_height * 0.04
-    max_distance = max(margin_x, margin_y)
-    for obs in observations:
-        if obs["type"] in ("vehicle", "person"):
-            ground_point = obs["ground_point"]
-            near_water = False
-            for water in waters:
-                if "mask" in water:
-                    if point_near_detection_mask(ground_point, water, max_distance):
-                        near_water = True
-                        break
-                elif any(point_in_box(ground_point, expanded_box(w["box"], margin_x, margin_y)) for w in waters):
-                    near_water = True
-                    break
-            obs["near_water"] = near_water
-    
     return observations
 
 
@@ -947,9 +925,8 @@ def analyze_all_temporal_behaviors(frame_observations, image_width, image_height
     """
     综合分析所有帧中的危险行为，包括：
     1. 车辆越界行为
-    2. 行人危险行为（道路外、水域周边）
-    3. 车辆/行人水域周边危险
-    4. 异常聚集行为
+    2. 行人危险行为（道路外）
+    3. 异常聚集行为
     """
     # 1. 跟踪车辆轨迹
     vehicle_tracks = track_vehicle_observations(frame_observations, image_width, image_height)
@@ -958,21 +935,16 @@ def analyze_all_temporal_behaviors(frame_observations, image_width, image_height
     # 2. 分析行人危险行为
     person_danger_analysis = analyze_person_temporal_behavior(frame_observations, image_width, image_height)
     
-    # 3. 分析水域周边危险行为
-    water_danger_analysis = analyze_water_temporal_danger(frame_observations)
-    
-    # 4. 综合评分：取所有行为中的最高分
+    # 3. 综合评分：取所有行为中的最高分
     all_scores = []
     if vehicle_summary.get("module"):
         all_scores.append(vehicle_summary["module"]["score"])
     if person_danger_analysis.get("module"):
         all_scores.append(person_danger_analysis["module"]["score"])
-    if water_danger_analysis.get("module"):
-        all_scores.append(water_danger_analysis["module"]["score"])
     
     combined_score = max(all_scores) if all_scores else 0
     
-    # 5. 生成综合分析报告
+    # 4. 生成综合分析报告
     risks = []
     if vehicle_summary.get("persistent_offroad_track_count", 0) > 0:
         risks.append(f"车辆持续越界{vehicle_summary['persistent_offroad_track_count']}条")
@@ -980,12 +952,6 @@ def analyze_all_temporal_behaviors(frame_observations, image_width, image_height
         risks.append(f"车辆边缘行驶{vehicle_summary['edge_track_count']}条")
     if person_danger_analysis.get("offroad_person_tracks", 0) > 0:
         risks.append(f"行人道路外活动{person_danger_analysis['offroad_person_tracks']}条")
-    if person_danger_analysis.get("near_water_person_tracks", 0) > 0:
-        risks.append(f"行人临近水域{person_danger_analysis['near_water_person_tracks']}条")
-    if water_danger_analysis.get("near_water_vehicle_tracks", 0) > 0:
-        risks.append(f"车辆临近水域{water_danger_analysis['near_water_vehicle_tracks']}条")
-    if water_danger_analysis.get("near_water_person_tracks", 0) > 0:
-        risks.append(f"行人临近水域{water_danger_analysis['near_water_person_tracks']}条")
     
     if risks:
         status = module_status(combined_score)
@@ -1000,7 +966,6 @@ def analyze_all_temporal_behaviors(frame_observations, image_width, image_height
         "vehicle_tracks": vehicle_tracks,
         "vehicle_summary": vehicle_summary,
         "person_danger": person_danger_analysis,
-        "water_danger": water_danger_analysis,
         "combined_score": round(combined_score, 1),
         "tracks": vehicle_tracks,
         "persistent_offroad_track_count": vehicle_summary.get("persistent_offroad_track_count", 0),
@@ -1018,8 +983,6 @@ def analyze_all_temporal_behaviors(frame_observations, image_width, image_height
                 "vehicle_edge": vehicle_summary.get("edge_track_count", 0),
                 "vehicle_lane_change": vehicle_summary.get("lane_change_track_count", 0),
                 "person_offroad": person_danger_analysis.get("offroad_person_tracks", 0),
-                "person_near_water": person_danger_analysis.get("near_water_person_tracks", 0),
-                "vehicle_near_water": water_danger_analysis.get("near_water_vehicle_tracks", 0),
             }
         },
     }
@@ -1029,7 +992,6 @@ def analyze_person_temporal_behavior(frame_observations, image_width, image_heig
     """
     分析行人的时序危险行为：
     - 道路外行走
-    - 临近水域
     """
     # 收集所有帧中的行人观测
     all_person_obs = []
@@ -1041,43 +1003,31 @@ def analyze_person_temporal_behavior(frame_observations, image_width, image_heig
                     "timestamp_ms": frame_obs.get("timestamp_ms"),
                     "ground_point": obs.get("ground_point"),
                     "road_position": obs.get("road_position", {}),
-                    "near_water": obs.get("near_water", False),
                     "confidence": obs.get("confidence", 0),
                 })
     
     if not all_person_obs:
         return {
             "offroad_person_tracks": 0,
-            "near_water_person_tracks": 0,
             "module": None
         }
     
     # 简单的轨迹跟踪（按位置分组）
     offroad_person_count = 0
-    near_water_person_count = 0
     
     # 统计在道路外的行人帧数
     offroad_frames = sum(1 for obs in all_person_obs if not obs["road_position"].get("inside_road", False))
-    near_water_frames = sum(1 for obs in all_person_obs if obs.get("near_water", False))
     
     # 如果行人连续多帧在道路外，视为危险行为
     if offroad_frames >= 2:
         offroad_person_count = 1  # 至少有1条危险轨迹
     
-    if near_water_frames >= 2:
-        near_water_person_count = 1
+    score = min(80, offroad_person_count * 40)
     
-    score = min(80, offroad_person_count * 40 + near_water_person_count * 35)
-    
-    if offroad_person_count > 0 or near_water_person_count > 0:
+    if offroad_person_count > 0:
         status = module_status(score)
-        reason_parts = []
-        if offroad_person_count > 0:
-            reason_parts.append(f"发现{offroad_person_count}条行人持续在道路外行走的轨迹")
-        if near_water_person_count > 0:
-            reason_parts.append(f"发现{near_water_person_count}条行人临近水域的轨迹")
-        reason = "；".join(reason_parts)
-        suggestion = "行人道路外行走或临近水域存在安全隐患，建议现场复核。"
+        reason = f"发现{offroad_person_count}条行人持续在道路外行走的轨迹"
+        suggestion = "行人道路外行走存在安全隐患，建议现场复核。"
     else:
         status = "正常"
         reason = "未发现行人危险行为。"
@@ -1085,56 +1035,10 @@ def analyze_person_temporal_behavior(frame_observations, image_width, image_heig
     
     return {
         "offroad_person_tracks": offroad_person_count,
-        "near_water_person_tracks": near_water_person_count,
         "total_person_observations": len(all_person_obs),
         "module": {
             "key": "video_temporal_person",
             "title": "行人时序行为分析",
-            "status": status,
-            "score": round(score, 1),
-            "reason": reason,
-            "suggestion": suggestion,
-        }
-    }
-
-
-def analyze_water_temporal_danger(frame_observations):
-    """
-    分析车辆和行人临近水域的时序危险行为
-    """
-    vehicle_near_water_count = 0
-    person_near_water_count = 0
-    
-    for frame_obs in frame_observations:
-        for obs in frame_obs.get("observations", []):
-            if obs.get("near_water", False):
-                if obs.get("type") == "vehicle":
-                    vehicle_near_water_count += 1
-                elif obs.get("type") == "person":
-                    person_near_water_count += 1
-    
-    score = min(85, vehicle_near_water_count * 25 + person_near_water_count * 30)
-    
-    if vehicle_near_water_count > 0 or person_near_water_count > 0:
-        status = module_status(score)
-        reason_parts = []
-        if vehicle_near_water_count > 0:
-            reason_parts.append(f"{vehicle_near_water_count}帧车辆临近水域")
-        if person_near_water_count > 0:
-            reason_parts.append(f"{person_near_water_count}帧行人临近水域")
-        reason = f"时序分析发现：{'；'.join(reason_parts)}。"
-        suggestion = "车辆或行人临近水域区域，建议关注是否有落水或临水作业风险。"
-    else:
-        status = "正常"
-        reason = "未发现临近水域的危险行为。"
-        suggestion = "各目标与水域保持安全距离。"
-    
-    return {
-        "near_water_vehicle_tracks": vehicle_near_water_count,
-        "near_water_person_tracks": person_near_water_count,
-        "module": {
-            "key": "video_temporal_water",
-            "title": "水域周边时序危险分析",
             "status": status,
             "score": round(score, 1),
             "reason": reason,
@@ -1219,7 +1123,7 @@ def summarize_vehicle_tracks(tracks):
     if persistent_offroad:
         status = module_status(score)
         reason = f"短时序跟踪发现 {len(persistent_offroad)} 条车辆轨迹连续处于道路外，越界可信度较高。"
-        suggestion = "建议结合原视频复核这些持续越界轨迹，并优先查看是否进入人行道、绿化带、施工区或水域周边。"
+        suggestion = "建议结合原视频复核这些持续越界轨迹，并优先查看是否进入人行道、绿化带、施工区。"
     elif edge_tracks:
         status = module_status(score)
         reason = f"短时序跟踪发现 {len(edge_tracks)} 条车辆轨迹连续贴近道路边缘，存在疑似越界或靠边停留风险。"
@@ -1266,7 +1170,7 @@ def analyze_video_context(video_path, output_prefix, anchor_frame_index, fps, to
         image_width = detection.get("image_width") or image_width
         image_height = detection.get("image_height") or image_height
         
-        # 收集该帧的所有观测数据（车辆、行人、水域周边等）
+        # 收集该帧的所有观测数据
         observations = all_observations_from_detection(frame, detection)
         
         frame_observations.append(
@@ -1321,8 +1225,6 @@ def apply_temporal_context_to_detection(detection_data, temporal_context):
         "lane_change_track_count": temporal_context.get("lane_change_track_count", 0),
         "edge_track_count": temporal_context.get("edge_track_count", 0),
         "offroad_person_tracks": temporal_context.get("person_danger", {}).get("offroad_person_tracks", 0),
-        "near_water_person_tracks": temporal_context.get("person_danger", {}).get("near_water_person_tracks", 0),
-        "near_water_vehicle_tracks": temporal_context.get("water_danger", {}).get("near_water_vehicle_tracks", 0),
         "frames_used": len(temporal_context.get("frames", [])),
         "tracks_used": len(temporal_context.get("tracks", [])),
         "combined_score": temporal_context.get("combined_score", 0),
@@ -1355,7 +1257,11 @@ def draw_detection_result(image_path, output_path, detections):
 
     for item in detections:
         box = item["box"]
-        x1, y1, x2, y2 = [int(box[key]) for key in ("x1", "y1", "x2", "y2")]
+        # 支持列表 [x1,y1,x2,y2] 或字典 {"x1":...,"y1":...,"x2":...,"y2":...}
+        if isinstance(box, dict):
+            x1, y1, x2, y2 = [int(box[key]) for key in ("x1", "y1", "x2", "y2")]
+        else:
+            x1, y1, x2, y2 = [int(v) for v in box]
         color = colors.get(item.get("model_role"), (255, 255, 255))
         label = f"{item['class_name']} {item['confidence']:.2f}"
 
@@ -1517,8 +1423,7 @@ def analyze_scene(detections, class_count, image_width, image_height, fine_detec
     fine_people = [item for item in fine_detections if is_fine_person(item)]
     vehicles = fine_vehicles if fine_vehicles else scene_vehicles
     roads = groups.get("road_area", [])
-    # 过滤低置信度的水域和植被检测，减少误判
-    waters = [item for item in groups.get("water", []) if item.get("confidence", 0) >= WATER_MIN_CONFIDENCE]
+    # 过滤低置信度的植被检测，减少误判
     trees = [item for item in groups.get("tree", []) if item.get("confidence", 0) >= TREE_MIN_CONFIDENCE]
     buildings = groups.get("building", [])
 
@@ -1536,19 +1441,13 @@ def analyze_scene(detections, class_count, image_width, image_height, fine_detec
         scene_tags.append("建筑区域")
     if trees:
         scene_tags.append("植被覆盖")
-    if waters:
-        scene_tags.append("水域周边")
 
     road_ratio = area_ratio.get("road_area", 0)
     vehicle_count = len(vehicles)
     building_ratio = area_ratio.get("building", 0)
     tree_ratio = area_ratio.get("tree", 0)
-    water_ratio = area_ratio.get("water", 0)
 
-    # 只有当高置信度水域区域占图像面积 20% 以上时才判定为水域场景
-    if water_ratio >= 20 and len(waters) >= 2:
-        scene_type = "水域周边巡检场景"
-    elif vehicle_count >= 12 and road_ratio >= 15:
+    if vehicle_count >= 12 and road_ratio >= 15:
         scene_type = "交通车辆密集场景"
     elif road_ratio >= 20 and (vehicle_count > 0 or building_ratio > 5):
         scene_type = "城市道路巡检场景"
@@ -1659,46 +1558,6 @@ def analyze_scene(detections, class_count, image_width, image_height, fine_detec
         else "当前道路密度处于正常范围。"
     )
 
-    water_near_vehicle = 0
-    if waters:
-        margin_x = image_width * 0.04
-        margin_y = image_height * 0.04
-        max_distance = max(margin_x, margin_y)
-        for vehicle in vehicles:
-            ground_point = bottom_center_of_box(vehicle["box"])
-            if any(point_near_detection_mask(ground_point, water, max_distance) for water in waters if "mask" in water):
-                water_near_vehicle += 1
-            elif any(point_in_box(ground_point, expanded_box(water["box"], margin_x, margin_y)) for water in waters):
-                water_near_vehicle += 1
-
-    water_near_person = 0
-    if waters:
-        margin_x = image_width * 0.04
-        margin_y = image_height * 0.04
-        max_distance = max(margin_x, margin_y)
-        for person in fine_people:
-            ground_point = bottom_center_of_box(person["box"])
-            if any(point_near_detection_mask(ground_point, water, max_distance) for water in waters if "mask" in water):
-                water_near_person += 1
-            elif any(point_in_box(ground_point, expanded_box(water["box"], margin_x, margin_y)) for water in waters):
-                water_near_person += 1
-
-    if waters and (water_near_vehicle or water_near_person):
-        water_score = min(85, 35 + water_near_vehicle * 15 + water_near_person * 18)
-        water_reason = (
-            f"检测到水域区域，且有 {water_near_vehicle} 个车辆目标、"
-            f"{water_near_person} 个人员目标位于水域邻近范围。"
-        )
-        water_suggestion = "建议对水域周边人员和车辆活动进行人工复核，关注临水道路、停留和落水风险。"
-    elif waters:
-        water_score = 5
-        water_reason = f"检测到水域区域，水域面积占比约 {water_ratio:.2f}%，未发现人员或车辆邻近水域。"
-        water_suggestion = "当前水域周边风险较低，可作为常规巡检记录。"
-    else:
-        water_score = 0
-        water_reason = "未检测到水域区域。"
-        water_suggestion = "当前图像跳过水域异常分析。"
-
     low_conf_count = len([item for item in all_detections if item["confidence"] < 0.4])
     if all_detections:
         low_conf_rate = low_conf_count / len(all_detections)
@@ -1731,14 +1590,6 @@ def analyze_scene(detections, class_count, image_width, image_height, fine_detec
             "score": round(traffic_score, 1),
             "reason": traffic_reason,
             "suggestion": traffic_suggestion,
-        },
-        {
-            "key": "water_safety",
-            "title": "水域周边风险",
-            "status": module_status(water_score),
-            "score": round(water_score, 1),
-            "reason": water_reason,
-            "suggestion": water_suggestion,
         },
         {
             "key": "confidence",
@@ -1781,8 +1632,6 @@ def analyze_scene(detections, class_count, image_width, image_height, fine_detec
             "road_box_vehicle_count": road_match_method_count["box"],
             "road_edge_vehicle_count": edge_vehicle_count,
             "road_position_zone_count": position_summary["zone_count"],
-            "water_near_vehicle_count": water_near_vehicle,
-            "water_near_person_count": water_near_person,
             "low_confidence_count": low_conf_count,
         },
         "vehicle_positions": vehicle_positions,
@@ -2022,7 +1871,7 @@ async def detect_image(
                 "scene": {
                     "enabled": True,
                     "path": str(SCENE_MODEL_PATH),
-                    "description": "自训练航拍场景模型，用于道路、建筑、树木、水域等场景要素识别；车辆目标由细粒度模型负责。",
+                    "description": "自训练航拍场景模型，用于道路、建筑、树木等场景要素识别；车辆目标由细粒度模型负责。",
                 },
                 "visdrone": {
                     "enabled": visdrone_model is not None,

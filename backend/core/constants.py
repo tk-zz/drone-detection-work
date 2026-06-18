@@ -57,7 +57,5 @@ VISDRONE_PERSON_CLASSES = {"pedestrian", "people"}
 SCENE_VEHICLE_CLASSES = {"vehicle"}
 SCENE_PERSON_CLASSES = {"person"}
 
-# 水域检测置信度阈值，低于此值的检测结果将被忽略以减少误判
-WATER_MIN_CONFIDENCE = 0.45
 # 植被检测置信度阈值
 TREE_MIN_CONFIDENCE = 0.40
